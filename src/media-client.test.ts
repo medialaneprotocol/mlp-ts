@@ -292,7 +292,7 @@ describe("the media-lane client (MLP spec §6.3, §§7.2)", () => {
         capabilities: [],
         resumeTtlSeconds: 0,
         mediaSupported: false,
-        mediaUnsupportedReason: "no_host_capability",
+        mediaUnsupportedReason: "no_sender_capability",
       }),
     }));
 
@@ -384,7 +384,7 @@ describe("the media-lane client (MLP spec §6.3, §§7.2)", () => {
     expect(report.inputSubmitted).toBe(10);
     expect(report.inputExpired).toBe(1);
     expect(report.activePath).toBe(1);
-    expect(report.appVersion).toBe("mlp-viewer-v1");
+    expect(report.appVersion).toBe("mlp-receiver-v1");
     expect(test.client.stats.goodputBps).toBe(4_000);
   });
 

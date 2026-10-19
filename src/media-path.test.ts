@@ -166,7 +166,7 @@ describe("path selection, the S1 half (MLP spec §7.8)", () => {
     expect(promote()).toBe("WS");
   });
 
-  it("honours the the corresponding deployment setting=off kill switch (§§13)", () => {
+  it("honours the path-selection kill switch (§12.2)", () => {
     let now = 0;
     const selector = new MediaPathSelector({ selection: "off", rtt: () => 100, now: () => now });
     selector.registerWebSocket(() => 1_000_000);

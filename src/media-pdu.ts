@@ -854,7 +854,7 @@ export class MediaObjectAssembler {
  * `bit i` means update `highestAppliedUpdateId - i` was applied. The wire field
  * is a `uint64`; the generated decoder/encoder represents 64-bit values as a
  * JavaScript number, so the window keeps the low 53 bits exactly and reports
- * when it had to truncate (the sender then re-sends those blocks, which is the
+ * when it had to truncate (the sender then re-sends those cells, which is the
  * conservative direction).
  */
 export class MediaAckWindow {
@@ -887,7 +887,7 @@ export class MediaAckWindow {
    * `ack_bitmap` is a `uint64`, and the generated codec moves 64-bit values
    * through a JavaScript number, so bits 53..63 cannot be transported: they
    * are counted here and left clear. The sender then treats those updates as
-   * unacked and re-sends their blocks, which is the conservative direction
+   * unacked and re-sends their cells, which is the conservative direction
    * (§§7.5.2's ring-miss rule applies the same reasoning and counts it).
    */
   bitmapNumber(): number {
@@ -944,7 +944,7 @@ export class MediaAckWindow {
     }
   }
 
-  /** Seed the window from a resume ack (`next_frame_id` is exclusive). */
+  /** Seed the window from a resume ack (`next_update_id` is exclusive). */
   seedFromResume(highestAppliedUpdateId: number): void {
     this.reset();
     this.highest = Math.max(0, highestAppliedUpdateId);

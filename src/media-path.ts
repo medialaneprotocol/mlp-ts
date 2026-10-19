@@ -12,10 +12,10 @@
  *   its own availability, goodput and last probe window;
  * - the selector decides under the §6.8 hysteresis and calls `onSwitch` with a
  *   `MediaPathChange`-shaped object, at which point the *carrier* moves and the
- *   `frame_id` chain does not: the media lane keeps the same codec chain, the
+ *   `update_id` chain does not: the media lane keeps the same codec chain, the
  *   same `media_session_id`, and the same object-id counter;
- * - `the corresponding deployment setting=off` (bootstrap) forces `ws` even when a datagram
- *   candidate is available — the kill switch of §13.
+ * - the path-selection setting `off` (bootstrap) forces `ws` even when a datagram
+ *   candidate is available — the kill switch of §12.2.
  *
  * Everything here is policy, so it holds no transport and no timers: the caller
  * ticks it.
@@ -86,7 +86,7 @@ export type MediaPathChangeEvent = {
 };
 
 export type MediaPathSelectorOptions = {
-  /** `the corresponding deployment setting` from the bootstrap: `auto` or `off`. */
+  /** The path-selection setting from the bootstrap: `auto` or `off`. */
   selection?: "auto" | "off";
   /** The receiver's smoothed RTT; the selector re-reads it through `rtt()`. */
   rtt?: () => number;

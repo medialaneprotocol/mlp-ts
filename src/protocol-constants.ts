@@ -133,7 +133,7 @@ export const ResumeRejectReason = {
   UNKNOWN_SESSION: "unknown_session",
   TOKEN_EXPIRED: "token_expired",
   TOKEN_INVALID: "token_invalid",
-  VIEWER_MISMATCH: "viewer_mismatch",
+  PEER_MISMATCH: "peer_mismatch",
   EPOCH_STALE: "epoch_stale",
   EPOCH_MISMATCH: "epoch_mismatch",
   PARK_EVICTED: "park_evicted",
@@ -143,7 +143,7 @@ export const ResumeRejectReason = {
 export const MediaUnsupportedReason = {
   PROTOCOL: "protocol",
   DISABLED_BY_POLICY: "disabled_by_policy",
-  NO_HOST_CAPABILITY: "no_host_capability",
+  NO_SENDER_CAPABILITY: "no_sender_capability",
 } as const;
 
 /**
@@ -175,7 +175,7 @@ export const DEFAULT_MEDIA_RESUME_TTL_SECONDS = 900;
  *
  * Diagnostics only; the protocol never parses it.
  */
-export const MEDIA_APP_VERSION = "mlp-viewer-v1";
+export const MEDIA_APP_VERSION = "mlp-receiver-v1";
 
 // ── RTT-relative timeouts (spec §10) ───────────────────────────────────────
 //
@@ -205,7 +205,7 @@ export function laneProbeTimeoutMs(rttMs: number): number {
 }
 
 /** `clamp(2 × RTT + 500 ms, 1 s, 10 s)` — the waiting-update timeout. */
-export function waitingFrameTimeoutMs(rttMs: number): number {
+export function waitingUpdateTimeoutMs(rttMs: number): number {
   return clampNumber(2 * rttMs + 500, 1_000, 10_000);
 }
 

@@ -253,7 +253,7 @@ describe("MLP object assembly (MLP spec §5.4)", () => {
     if (outcome.kind === "object") {
       expect(Array.from(outcome.object.payload)).toEqual([1, 2, 3, 4, 1, 2]);
       // The extension of fragment 0 is the object's metadata (the sender
-      // stamps FrameMeta there and only there).
+      // stamps UpdateMeta there and only there).
       expect(readTlvU64(outcome.object, MediaTlv.UPDATE_ID)).toBe(5);
     }
   });

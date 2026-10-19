@@ -128,7 +128,7 @@ export type MediaLaneClientOptions = {
   resumeSnapshot: () => MediaResumeSnapshot;
   /** The feedback body's receiver-owned fields. */
   feedbackSource: () => MediaFeedbackSource;
-  /** `the corresponding deployment setting` from the bootstrap (diagnostics only here). */
+  /** The path-selection setting from the bootstrap (diagnostics only here). */
   inputDeadlineMs?: number;
   /** Epoch ms; the caller owns the clock in tests. */
   now?: () => number;
@@ -768,7 +768,7 @@ export class MediaLaneClient {
     return this.fallbackTransport !== null;
   }
 
-  /** S2 seam: record a carrier switch; the `frame_id` chain continues. */
+  /** S2 seam: record a carrier switch; the `update_id` chain continues. */
   notePathChange(change: MediaPathChangeEvent): void {
     this.activePathKind = change.to;
     this.activePathName = change.toPath;
