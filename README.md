@@ -83,3 +83,17 @@ requires a separate license. See [LICENSE](LICENSE).
 
 The [specification](../mlp) and the [wire schemas](../mlp-proto) are under
 Apache-2.0, so any implementation may interoperate with this one.
+
+## The sibling repositories
+
+Two of this package's dependencies are links to sibling repositories rather
+than published packages:
+
+| Dependency | Where it is expected |
+|---|---|
+| `@medialaneprotocol/proto` | `../mlp-proto` |
+| `@tessellio/ts` | `../../tessellio-polyrepo/tessellio-ts` |
+
+The protocol's own repositories are siblings of this one; the codec lives in
+its own organisation's repository, one level further out. A checkout that
+lays the two organisations out side by side installs this package unchanged.
