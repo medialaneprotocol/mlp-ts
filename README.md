@@ -31,6 +31,13 @@ The protocol moves the bytes, accounts for them, and paces them, and it never
 interprets their content — so a codec plugs in without the protocol learning
 anything about it.
 
+The one place the two meet is `screen-stream`: the receiver-side state
+machine that applies a codec's updates to a surface and answers with the
+protocol's acknowledgement. It reads the codec's own pieces from the codec's
+package, because the transport depends on the codec, never the other way
+round. With [`@tessellio/ts`](https://github.com/tessellio/tessellio-ts) as
+that codec, the dependency runs in that direction.
+
 ## Layout
 
 | Module | Responsibility |
@@ -40,6 +47,7 @@ anything about it.
 | `media-resume` | parking, resume, and close classification |
 | `media-path` | carrier selection and hysteresis |
 | `protocol-constants` | the shared constants and the RTT-relative timeouts |
+| `screen-stream` | the receiver-side state machine: it applies a codec's updates to a surface and reports what it applied |
 
 ## The two rules that are load-bearing
 
