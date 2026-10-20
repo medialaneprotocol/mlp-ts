@@ -22,7 +22,7 @@ type TestCanvas = {
   canvas: HTMLCanvasElement;
   cells: Uint8ClampedArray;
   draws: Array<{ x: number; y: number; width: number; height: number }>;
-  readPixel: (x: number, y: number) => number[];
+  readCell: (x: number, y: number) => number[];
 };
 
 function createTestCanvas(width: number, height: number): TestCanvas {
@@ -76,7 +76,7 @@ function createTestCanvas(width: number, height: number): TestCanvas {
     canvas,
     cells,
     draws,
-    readPixel: (x: number, y: number) =>
+    readCell: (x: number, y: number) =>
       Array.from(cells.subarray((y * canvas.width + x) * 4, (y * canvas.width + x) * 4 + 4)),
   };
 }
@@ -294,8 +294,8 @@ describe("ScreenStream rendering and acks", () => {
     expect(typeof (acks(sends)[0].payload as { renderLatencyMs: number }).renderLatencyMs).toBe("number");
     expect(stream.appliedUpdateId).toBe(1);
     expect(harness.draws).toHaveLength(1);
-    expect(harness.readPixel(0, 0)).toEqual([255, 0, 0, 255]);
-    expect(harness.readPixel(0, 1)).toEqual([0, 255, 0, 255]);
+    expect(harness.readCell(0, 0)).toEqual([255, 0, 0, 255]);
+    expect(harness.readCell(0, 1)).toEqual([0, 255, 0, 255]);
     expect(stream.stats.updatesApplied).toBe(1);
   });
 
@@ -308,9 +308,9 @@ describe("ScreenStream rendering and acks", () => {
     await vi.waitFor(() => expect(acks(sends)).toHaveLength(2));
 
     expect(acks(sends)[1].payload).toMatchObject({ updateId: 2 });
-    expect(harness.readPixel(1, 1)).toEqual([255, 255, 255, 255]);
-    expect(harness.readPixel(2, 1)).toEqual([255, 0, 255, 255]);
-    expect(harness.readPixel(0, 1)).toEqual([0, 0, 0, 255]);
+    expect(harness.readCell(1, 1)).toEqual([255, 255, 255, 255]);
+    expect(harness.readCell(2, 1)).toEqual([255, 0, 255, 255]);
+    expect(harness.readCell(0, 1)).toEqual([0, 0, 0, 255]);
     expect(stream.appliedUpdateId).toBe(2);
   });
 
@@ -326,7 +326,7 @@ describe("ScreenStream rendering and acks", () => {
     expect(acks(sends)[1].payload).toMatchObject({ updateId: 2 });
     expect(stream.appliedUpdateId).toBe(2);
     expect(harness.draws).toHaveLength(drawsAfterReset);
-    expect(harness.readPixel(1, 1)).toEqual([0, 0, 0, 255]);
+    expect(harness.readCell(1, 1)).toEqual([0, 0, 0, 255]);
   });
 
   it("notifies the UI once a update is applied", async () => {
@@ -351,7 +351,7 @@ describe("ScreenStream rejections and resync", () => {
 
     expect(resyncs(sends)[0].payload).toEqual({ heldUpdateId: 1, reason: "BASE_MISMATCH" });
     expect(stream.appliedUpdateId).toBe(1);
-    expect(harness.readPixel(0, 0)).toEqual([255, 0, 0, 255]);
+    expect(harness.readCell(0, 0)).toEqual([255, 0, 0, 255]);
     expect(acks(sends)).toHaveLength(1);
   });
 
@@ -383,7 +383,7 @@ describe("ScreenStream rejections and resync", () => {
 
     expect(resyncs(sends)[0].payload).toEqual({ heldUpdateId: 1, reason: "DECODE_ERROR" });
     expect(stream.appliedUpdateId).toBe(1);
-    expect(harness.readPixel(0, 0)).toEqual([0, 0, 255, 255]);
+    expect(harness.readCell(0, 0)).toEqual([0, 0, 255, 255]);
     expect(acks(sends)).toHaveLength(1);
   });
 
@@ -419,7 +419,7 @@ describe("ScreenStream rejections and resync", () => {
     expect(acks(sends)).toHaveLength(1);
     expect(stream.appliedUpdateId).toBe(5);
     expect(stream.stats.updatesDropped).toBe(1);
-    expect(harness.readPixel(0, 0)).toEqual([0, 0, 0, 255]);
+    expect(harness.readCell(0, 0)).toEqual([0, 0, 0, 255]);
   });
 
   it("rejects an unknown codec", async () => {
@@ -521,7 +521,7 @@ describe("ScreenStream WebRTC and lifecycle", () => {
     stream.onWebRtcFlowing(false);
     applyPart(stream, resetUpdate(1, 2, 2, () => 0xffff));
     await vi.waitFor(() => expect(acks(sends)).toHaveLength(1));
-    expect(harness.readPixel(0, 0)).toEqual([255, 255, 255, 255]);
+    expect(harness.readCell(0, 0)).toEqual([255, 255, 255, 255]);
   });
 
   it("stops rendering and forgets the applied update on stop", async () => {
@@ -552,7 +552,7 @@ describe("INV-R: the canvas equals the sender's reference for the applied update
           const red = (value >> 11) & 0x1f;
           const green = (value >> 5) & 0x3f;
           const blue = value & 0x1f;
-          expect(harness.readPixel(x, y)).toEqual([
+          expect(harness.readCell(x, y)).toEqual([
             (red << 3) | (red >> 2),
             (green << 2) | (green >> 4),
             (blue << 3) | (blue >> 2),

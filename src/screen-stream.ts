@@ -227,7 +227,7 @@ export class ScreenStream {
   /**
    * Note the sender's chain epoch (MLP spec §6.6).
    *
-   * A newer epoch means the host broke the chain: the receiver resets its
+   * A newer epoch means the sender broke the chain: the receiver resets its
    * *canvas trust* to "all stale" without clearing the cells, reports the
    * epoch in its next ack, and accepts the anchor plan that follows.
    */
@@ -530,7 +530,7 @@ export class ScreenStream {
    * and the first reason seen in the window.
    *
    * MLP spec §6.6: `screen.update.resync` starts a plan. The only reset-update
-   * case left is a geometry change, which the host watches for itself.
+   * case left is a geometry change, which the sender watches for itself.
    */
   private requestResync(reason: ResyncReason): void {
     const held = this.applied;
@@ -563,7 +563,7 @@ export class ScreenStream {
   }
 
   private emitResync(held: number, reason: ResyncReason): void {
-    // Repair is ack-driven on the media lane (D-7): the host re-encodes the
+    // Repair is ack-driven on the media lane (D-7): the sender re-encodes the
     // blocks the receiver's `MediaAck` leaves pending, so nothing is sent here.
     // The history is diagnostics for the receiver's own state.
     this.resyncHistory.push({ reason, held });

@@ -94,7 +94,7 @@ export const MediaTlv = {
   PACE_BPS: 0x0b,
   PATH_HINT: 0x0c,
   INPUT_SEQ: 0x0d,
-  BLOCK_COUNT: 0x0e,
+  CELL_COUNT: 0x0e,
   COST_MS: 0x0f,
 } as const;
 
