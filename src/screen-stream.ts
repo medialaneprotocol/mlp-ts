@@ -47,8 +47,8 @@ export type ViewerAck = {
   highestAppliedUpdateId: number;
   ackBitmap: number;
   chainEpoch: number;
-  appliedBlockCount: number;
-  staleBlocks: number;
+  appliedCellCount: number;
+  staleCells: number;
   converged: boolean;
   renderLatencyMs: number;
   hasRenderLatencyMs: boolean;
@@ -74,9 +74,9 @@ export type ScreenStreamOptions = {
   /** Output the lane reports in `MediaFeedback`/`MediaAck`. */
   onAckNow?: (ack: ViewerAck) => void;
   /** The cell grid size the ack advertises (MLP spec §6.5.1). */
-  appliedBlockCount?: () => number;
+  appliedCellCount?: () => number;
   /** The highest input sequence reflected by an applied update (MLP spec §5). */
-  onMediaState?: (state: { chainEpoch: number; staleBlocks: number; appliedUpdateId: number }) => void;
+  onMediaState?: (state: { chainEpoch: number; staleCells: number; appliedUpdateId: number }) => void;
 };
 
 export type ScreenStreamStats = {
@@ -115,7 +115,7 @@ export class ScreenStream {
 
   private applied = 0;
   private chainEpoch = 0;
-  private staleBlocks = 0;
+  private staleCells = 0;
   private converged = true;
   private geometry: { width: number; height: number } | null = null;
   private updateStartedAtMs: number | null = null;
@@ -152,9 +152,9 @@ export class ScreenStream {
     return this.chainEpoch;
   }
 
-  /** The receiver's own cell-stale estimate (`MediaAck.stale_blocks`). */
-  get staleBlockCount(): number {
-    return this.staleBlocks;
+  /** The receiver's own cell-stale estimate (`MediaAck.stale_cells`). */
+  get staleCellCount(): number {
+    return this.staleCells;
   }
 
   get isConverged(): boolean {
@@ -236,7 +236,7 @@ export class ScreenStream {
       return false;
     }
     this.chainEpoch = epoch;
-    this.staleBlocks = this.blockCount();
+    this.staleCells = this.cellCount();
     this.converged = false;
     this.epochBreaks += 1;
     this.ackWindow.reset();
@@ -291,8 +291,8 @@ export class ScreenStream {
     this.partedOrder.length = 0;
   }
 
-  private blockCount(): number {
-    return Math.max(1, this.options.appliedBlockCount?.() ?? 1);
+  private cellCount(): number {
+    return Math.max(1, this.options.appliedCellCount?.() ?? 1);
   }
 
   private rememberPart(key: string): void {
@@ -442,7 +442,7 @@ export class ScreenStream {
     this.ackWindow.mark(update.updateId);
     this.chainEpoch = Math.max(this.chainEpoch, meta.chainEpoch);
     this.lastReflectedInputSeq = Math.max(this.lastReflectedInputSeq, meta.reflectsInputSeq);
-    this.staleBlocks = 0;
+    this.staleCells = 0;
     this.converged = true;
     const ack = this.buildAck(renderLatencyMs);
     this.options.onAck?.(ack);
@@ -456,9 +456,9 @@ export class ScreenStream {
       highestAppliedUpdateId: this.ackWindow.highestAppliedUpdateId,
       ackBitmap: this.ackWindow.bitmapNumber(),
       chainEpoch: this.chainEpoch,
-      appliedBlockCount: this.blockCount(),
-      staleBlocks: this.staleBlocks,
-      converged: this.converged && this.staleBlocks === 0,
+      appliedCellCount: this.cellCount(),
+      staleCells: this.staleCells,
+      converged: this.converged && this.staleCells === 0,
       renderLatencyMs,
       hasRenderLatencyMs: renderLatencyMs > 0,
       echoOfInputSeq: this.lastReflectedInputSeq,
@@ -486,7 +486,7 @@ export class ScreenStream {
   private emitMediaState(): void {
     this.options.onMediaState?.({
       chainEpoch: this.chainEpoch,
-      staleBlocks: this.staleBlocks,
+      staleCells: this.staleCells,
       appliedUpdateId: this.applied,
     });
   }
@@ -535,7 +535,7 @@ export class ScreenStream {
   private requestResync(reason: ResyncReason): void {
     const held = this.applied;
     const timestamp = this.now();
-    this.staleBlocks = Math.max(this.staleBlocks, 0);
+    this.staleCells = Math.max(this.staleCells, 0);
 
     if (timestamp - this.lastResyncAtMs >= this.resyncIntervalMs) {
       this.emitResync(held, reason);
