@@ -120,6 +120,11 @@ npm run typecheck
 npm run lint
 ```
 
+## Status
+
+In development. One moving version, `v0.1.0`, naming the current commit:
+there is exactly one tag, and a change moves it.
+
 ## License
 
 PolyForm Noncommercial 1.0.0 — free for non-commercial use. Commercial use
