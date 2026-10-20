@@ -79,10 +79,10 @@ describe("MLP fragment codec (MLP spec §5.2)", () => {
     expect(bytes.byteLength).toBe(FRAGMENT_FIXED_HEADER + 61 + 3);
   });
 
-  it("recognizes the RMLP magic and rejects everything else", () => {
+  it("recognizes the MLP magic and rejects everything else", () => {
     const bytes = mediaFragment();
     expect(hasMediaFragmentMagic(bytes)).toBe(true);
-    expect(hasMediaFragmentMagic(new Uint8Array([0x52, 0x4d, 0x4c]))).toBe(false);
+    expect(hasMediaFragmentMagic(new Uint8Array([0x4d, 0x4c, 0x50]))).toBe(false);
 
     const broken = new Uint8Array(bytes);
     broken[0] = 0x00;
@@ -465,23 +465,23 @@ describe("the 64-id ack grid (MLP spec §6.2)", () => {
   it("marks, shifts and reports the window", () => {
     const window = new MediaAckWindow();
     expect(window.highestAppliedUpdateId).toBe(0);
-    expect(window.bitmapNumber()).toBe(0);
+    expect(window.bitmap).toBe(0n);
 
     window.mark(10);
     expect(window.highestAppliedUpdateId).toBe(10);
-    expect(window.bitmapNumber()).toBe(1);
+    expect(window.bitmap).toBe(1n);
     expect(window.has(10)).toBe(true);
     expect(window.has(9)).toBe(false);
 
     window.mark(12);
     expect(window.highestAppliedUpdateId).toBe(12);
     // bit 0 = update 12, bit 1 = update 11 (not applied), bit 2 = update 10.
-    expect(window.bitmapNumber()).toBe(0b101);
+    expect(window.bitmap).toBe(0b101n);
     expect(window.has(10)).toBe(true);
     expect(window.has(11)).toBe(false);
 
     window.mark(11);
-    expect(window.bitmapNumber()).toBe(0b111);
+    expect(window.bitmap).toBe(0b111n);
   });
 
   it("keeps 64 ids and forgets anything older", () => {
@@ -493,16 +493,39 @@ describe("the 64-id ack grid (MLP spec §6.2)", () => {
 
     window.mark(37);
     expect(window.has(37)).toBe(true);
-    // Bit 63 cannot travel as a JS number; the clamp is counted and leaves the
-    // sender's conservative re-send path in charge (§§7.5.2's ring-miss rule).
-    expect(window.bitmapNumber()).toBe(1);
-    expect(window.truncatedBits).toBe(1);
+    // The window is 64 bits wide, and bit 63 is a real bit: the browser
+    // reports it, and the sender reads it as "applied".
+    expect(window.bitmap).toBe((1n << 63n) | 1n);
+  });
+
+  it("carries the whole 64-bit window, not 53 bits of it", () => {
+    const window = new MediaAckWindow();
+    for (let update = 1; update <= 64; update += 1) {
+      window.mark(update);
+    }
+
+    expect(window.highestAppliedUpdateId).toBe(64);
+    // Every one of the 64 ids is marked: the window is all ones.
+    expect(window.bitmap).toBe((1n << 64n) - 1n);
+    expect(window.bitmap > BigInt(Number.MAX_SAFE_INTEGER)).toBe(true);
+  });
+
+  it("marks the update id zero, the way the reference implementation does", () => {
+    const window = new MediaAckWindow();
+
+    window.mark(0);
+
+    // The window records what it was told; the id zero is not an update id,
+    // so the window never reports it as applied.
+    expect(window.bitmap).toBe(1n);
+    expect(window.has(0)).toBe(false);
+    expect(window.highestAppliedUpdateId).toBe(0);
   });
 
   it("seeds from a resume ack", () => {
     const window = new MediaAckWindow();
     window.seedFromResume(42);
     expect(window.highestAppliedUpdateId).toBe(42);
-    expect(window.bitmapNumber()).toBe(1);
+    expect(window.bitmap).toBe(1n);
   });
 });

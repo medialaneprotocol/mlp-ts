@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   MediaReceiverMachine,
+  isAckApplied,
+  validateAck,
   type MediaObjectMeta,
   type MediaReceiverOptions,
   type RepairRequest,
@@ -56,10 +58,10 @@ describe("the applied window", () => {
     expect(machine.appliedUpdateId).toBe(4);
     expect(machine.ack.highestAppliedUpdateId).toBe(4);
     // Bit i names update `highest - i`: 4, 2 and 1 are applied, 3 is not.
-    expect(machine.ack.ackBitmap).toBe(0b1101);
+    expect(machine.ack.ackBitmap).toBe(0b1101n);
     expect(machine.stats.appliedUpdates).toBe(3);
     expect(acks).toHaveLength(3);
-    expect(acks[2]).toMatchObject({ highestAppliedUpdateId: 4, ackBitmap: 0b1101 });
+    expect(acks[2]).toMatchObject({ highestAppliedUpdateId: 4, ackBitmap: 0b1101n });
   });
 
   it("slides the window beyond 64 updates", () => {
@@ -71,7 +73,7 @@ describe("the applied window", () => {
 
     expect(machine.appliedUpdateId).toBe(100);
     // The low 32 bits of the window are the last 32 updates, all applied.
-    expect(machine.ack.ackBitmap % 2 ** 32).toBe(0xffff_ffff);
+    expect(machine.ack.ackBitmap & 0xffff_ffffn).toBe(0xffff_ffffn);
   });
 
   it("does not mark an update that fell out of the window", () => {
@@ -98,7 +100,29 @@ describe("the applied window", () => {
     machine.noteApplied(70);
 
     expect(machine.appliedUpdateId).toBe(70);
-    expect(machine.ack.ackBitmap).toBe(1);
+    expect(machine.ack.ackBitmap).toBe(1n);
+  });
+
+  it("reports the whole 64-bit window", () => {
+    const { machine } = createMachine();
+
+    for (let update = 1; update <= 64; update += 1) {
+      machine.noteApplied(update);
+    }
+
+    // Every one of the 64 ids is applied: the window is all ones, and the
+    // upper 11 bits are the ones a JavaScript number cannot hold.
+    expect(machine.ack.ackBitmap).toBe((1n << 64n) - 1n);
+  });
+
+  it("marks the update id zero, the way the reference implementation does", () => {
+    const { machine } = createMachine();
+
+    machine.noteApplied(0);
+
+    expect(machine.ack.ackBitmap).toBe(1n);
+    expect(machine.appliedUpdateId).toBe(0);
+    expect(machine.stats.appliedUpdates).toBe(1);
   });
 });
 
@@ -115,9 +139,10 @@ describe("the chain epoch", () => {
     expect(machine.staleCellCount).toBe(16);
     expect(machine.isConverged).toBe(false);
     expect(machine.stats.epochBreaks).toBe(1);
-    // The applied window starts again with the new chain.
-    expect(machine.appliedUpdateId).toBe(0);
-    expect(machine.ack.ackBitmap).toBe(0);
+    // The receiver keeps the content it holds, so the window of what it
+    // applied keeps standing: an epoch is not an update.
+    expect(machine.appliedUpdateId).toBe(5);
+    expect(machine.ack.ackBitmap).toBe(1n);
   });
 
   it("refuses an epoch that is not newer", () => {
@@ -153,18 +178,19 @@ describe("the ack", () => {
 
     expect(machine.ack.staleCells).toBe(3);
     expect(machine.ack.appliedCellCount).toBe(16);
-    // The receiver is not converged while it believes a cell is stale.
-    expect(machine.ack.converged).toBe(false);
-    expect(machine.isConverged).toBe(false);
-  });
-
-  it("reports convergence only when no cell is stale", () => {
-    const { machine } = createMachine();
-
-    machine.setViewerState(0, 16, true);
-
+    // The belief is the application's, and the machine reports it as it comes:
+    // the sender's accounting is the authoritative one (MLP spec §5.2).
     expect(machine.ack.converged).toBe(true);
     expect(machine.isConverged).toBe(true);
+  });
+
+  it("reports the convergence the application believes, not its own", () => {
+    const { machine } = createMachine();
+
+    machine.setViewerState(0, 16, false);
+
+    expect(machine.ack.converged).toBe(false);
+    expect(machine.isConverged).toBe(false);
   });
 
   it("reports the render latency only when one was measured", () => {
@@ -179,15 +205,46 @@ describe("the ack", () => {
     expect(machine.ack.renderLatencyMs).toBe(12.5);
   });
 
-  it("carries the highest input sequence the receiver knows about", () => {
+  it("carries the input sequence the applied cells reflect", () => {
     const { machine } = createMachine();
 
     machine.setEchoOfInputSeq(42);
     expect(machine.ack.echoOfInputSeq).toBe(42);
     expect(machine.reflectedInputSeq).toBe(42);
 
+    // The sender's stamp on an object is the sender's claim; it is not the
+    // applied content's echo, so the acknowledgement does not carry it.
     machine.onMediaObject({ objectId: 1, reflectsInputSeq: 7 });
     expect(machine.ack.echoOfInputSeq).toBe(42);
+    expect(machine.laneReflectedInputSeq).toBe(7);
+  });
+
+  it("takes the application's report as it comes and keeps the lane's stamp apart", () => {
+    const { machine } = createMachine();
+
+    // The lane's stamps are the sender's claims: they only grow.
+    machine.onMediaObject({ objectId: 1, reflectsInputSeq: 7 });
+    machine.onMediaObject({ objectId: 2, reflectsInputSeq: 3 });
+    expect(machine.laneReflectedInputSeq).toBe(7);
+    expect(machine.ack.echoOfInputSeq).toBe(0);
+
+    // The application owns its own report: a rebase drops the content that
+    // reflected the older input, and the machine takes the report as it comes.
+    machine.setEchoOfInputSeq(11);
+    expect(machine.ack.echoOfInputSeq).toBe(11);
+    machine.setEchoOfInputSeq(2);
+    expect(machine.ack.echoOfInputSeq).toBe(2);
+  });
+
+  it("reports the session-relative epoch, not the page's clock", () => {
+    const { machine, clock } = createMachine();
+
+    clock.now = 1_500;
+    expect(machine.ack.ackEpochMs).toBe(1_500);
+    expect(machine.sessionMs).toBe(1_500);
+
+    clock.now = 2_000;
+    expect(machine.ack.ackEpochMs).toBe(2_000);
   });
 
   it("carries the three fields the sender reads", () => {
@@ -198,7 +255,7 @@ describe("the ack", () => {
 
     expect(machine.ackWire).toEqual({
       highestAppliedUpdateId: 3,
-      ackBitmap: 1,
+      ackBitmap: 1n,
       chainEpoch: 2,
     });
   });
@@ -286,7 +343,7 @@ describe("the resume", () => {
 
     expect(machine.appliedUpdateId).toBe(42);
     expect(machine.currentChainEpoch).toBe(3);
-    expect(machine.ack.ackBitmap).toBe(1);
+    expect(machine.ack.ackBitmap).toBe(1n);
   });
 
   it("reports the receiver's half of the resume body", () => {
@@ -299,9 +356,19 @@ describe("the resume", () => {
     expect(machine.resumeSnapshot).toMatchObject({
       appliedUpdateId: 7,
       chainEpoch: 1,
-      ackBitmap: 1,
+      ackBitmap: 1n,
       inputSeqNext: 12,
     });
+  });
+
+  it("keeps the deduplication boundary past the sender's stamp", () => {
+    const { machine } = createMachine();
+
+    machine.onMediaObject({ objectId: 1, reflectsInputSeq: 30 });
+
+    // The boundary is one past the highest input sequence the receiver knows
+    // about, so the sender never applies an input twice (MLP spec INV-3).
+    expect(machine.resumeSnapshot.inputSeqNext).toBe(31);
   });
 });
 
@@ -328,6 +395,52 @@ describe("the duplicate objects", () => {
   });
 });
 
+describe("the acknowledgement's own rules", () => {
+  it("answers the same way the reference implementation's window does", () => {
+    const { machine } = createMachine();
+
+    for (let update = 1; update <= 100; update += 1) {
+      machine.noteApplied(update);
+    }
+
+    // The reference implementation's own assertion: the window is 64 updates
+    // wide, so update 37 is inside it and update 36 is not.
+    const ack = machine.ack;
+    expect(isAckApplied(ack, 100)).toBe(true);
+    expect(isAckApplied(ack, 37)).toBe(true);
+    expect(isAckApplied(ack, 36)).toBe(false);
+    expect(isAckApplied(ack, 0)).toBe(false);
+    expect(isAckApplied(ack, 101)).toBe(false);
+  });
+
+  it("validates the acknowledgement the way a peer does", () => {
+    const { machine } = createMachine();
+
+    machine.noteApplied(4);
+    machine.setViewerState(0, 16, true);
+
+    expect(validateAck(machine.ack)).toBeNull();
+  });
+
+  it("refuses an acknowledgement whose window names an update it never applied", () => {
+    const { machine } = createMachine();
+
+    // A window that claims update 0 is applied names an update id that does
+    // not exist: the update ids start at 1.
+    machine.noteApplied(0);
+
+    expect(validateAck(machine.ack)).toBe("ACK_BAD_BITMAP");
+  });
+
+  it("refuses an acknowledgement that calls more cells stale than it applied", () => {
+    const { machine } = createMachine();
+
+    machine.setViewerState(9, 4, false);
+
+    expect(validateAck(machine.ack)).toBe("ACK_BAD_COUNT");
+  });
+});
+
 describe("the opaque body", () => {
   it("does not interpret a media body", () => {
     const { machine, acks, repairs } = createMachine();
@@ -338,7 +451,7 @@ describe("the opaque body", () => {
     machine.onMediaObject(meta);
 
     expect(machine.appliedUpdateId).toBe(0);
-    expect(machine.ack.ackBitmap).toBe(0);
+    expect(machine.ack.ackBitmap).toBe(0n);
     expect(machine.stats.appliedUpdates).toBe(0);
     expect(machine.stats.duplicatesIgnored).toBe(0);
     expect(machine.lastMediaObjectId).toBe(7);
@@ -360,6 +473,6 @@ describe("the opaque body", () => {
     expect(machine.currentChainEpoch).toBe(1);
     expect(machine.staleCellCount).toBe(16);
     expect(machine.appliedUpdateId).toBe(0);
-    expect(machine.ack.ackBitmap).toBe(0);
+    expect(machine.ack.ackBitmap).toBe(0n);
   });
 });

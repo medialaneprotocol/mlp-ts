@@ -17,7 +17,8 @@
  * be understood by the transport can still be moved by it.
  */
 
-import { MediaAckWindow } from "./media-pdu";
+import { ACK_WINDOW_BITS, MediaAckWindow } from "./media-pdu";
+import { FifoSet } from "./fifo-set";
 import { emptyResumeSnapshot, type MediaResumeSnapshot } from "./media-resume";
 import { DEFAULT_RTT_MS, waitingUpdateTimeoutMs } from "./protocol-constants";
 
@@ -54,10 +55,19 @@ export type RepairReason =
 /** One repair plan request: the update the receiver holds, and why. */
 export type RepairRequest = { heldUpdateId: number; reason: RepairReason };
 
-/** The receiver's ack payload (`MediaAck`, MLP spec §5.2). */
+/**
+ * The receiver's ack payload (`MediaAck`, MLP spec §5.2).
+ *
+ * `ackBitmap` is the acknowledgement's 64-bit window (MLP spec §5.2: "a 64-bit
+ * window of which updates around it were applied"), so it is a `bigint`: a
+ * JavaScript number cannot hold the window's upper 11 bits, and a receiver
+ * that reports 53 bits where the protocol says 64 is a different receiver —
+ * the sender reads the missing bits as "not applied" and re-sends cells the
+ * receiver already holds.
+ */
 export type ViewerAck = {
   highestAppliedUpdateId: number;
-  ackBitmap: number;
+  ackBitmap: bigint;
   chainEpoch: number;
   appliedCellCount: number;
   staleCells: number;
@@ -79,6 +89,53 @@ export type ReceiverStats = {
   /** Repair plan requests the receiver made. */
   repairsRequested: number;
 };
+
+/**
+ * Whether an update id is covered by an acknowledgement's window.
+ *
+ * The mirror of `MediaAck::is_applied` (MLP spec §5.2): bit `i` names update
+ * `highest − i`, the update ids start at 1, and the window is 64 ids wide.
+ */
+export function isAckApplied(ack: ViewerAck, updateId: number): boolean {
+  if (updateId < 1 || updateId > ack.highestAppliedUpdateId) {
+    return false;
+  }
+  const distance = ack.highestAppliedUpdateId - updateId;
+  if (distance >= ACK_WINDOW_BITS) {
+    return false;
+  }
+  return (ack.ackBitmap & (1n << BigInt(distance))) !== 0n;
+}
+
+/** Why a peer refuses an acknowledgement (MLP spec §5.2's validation rules). */
+export type AckRejectReason = "ACK_BAD_BITMAP" | "ACK_BAD_COUNT" | "BODY_INVALID";
+
+/**
+ * Validate an acknowledgement against the specification's rules (MLP spec §5.2).
+ *
+ * The mirror of `MediaAck::validate`: a set bit may name only an update the
+ * receiver applied — the update ids start at 1, so a set bit `i` must
+ * satisfy `i < highest` — the stale count may not exceed the applied count,
+ * and a latency that is not reported must be zero.
+ */
+export function validateAck(ack: ViewerAck): AckRejectReason | null {
+  let bits = ack.ackBitmap;
+  let bit = 0;
+  while (bits !== 0n) {
+    if ((bits & 1n) === 1n && bit >= ack.highestAppliedUpdateId) {
+      return "ACK_BAD_BITMAP";
+    }
+    bits >>= 1n;
+    bit += 1;
+  }
+  if (ack.staleCells > ack.appliedCellCount) {
+    return "ACK_BAD_COUNT";
+  }
+  if (!ack.hasRenderLatencyMs && ack.renderLatencyMs !== 0) {
+    return "BODY_INVALID";
+  }
+  return null;
+}
 
 /** How the receiver machine is set up. */
 export type MediaReceiverOptions = {
@@ -137,16 +194,36 @@ export class MediaReceiverMachine {
 
   /** The applied-update window (MLP spec §6.5.2). */
   private readonly ackWindow = new MediaAckWindow();
-  /** The applied `(update, part)` pairs, for `DUP` idempotence. */
-  private readonly appliedChunks = new Set<string>();
-  private readonly appliedChunkOrder: string[] = [];
+  /**
+   * The applied `(update, part)` pairs, for `DUP` idempotence.
+   *
+   * It is the reference implementation's shape — a set and a FIFO order over
+   * the same keys — so the oldest pair is dropped in constant time.
+   */
+  private readonly appliedChunks = new FifoSet<string>(APPLIED_CHUNK_WINDOW);
 
   private chainEpoch = 0;
   private staleCells = 0;
   private reportedCellCount = 0;
   private converged = false;
   private renderLatencyMs = 0;
+  /**
+   * What the applied cells reflect.
+   *
+   * It is the driver's own report (MLP spec §5.2: the acknowledgement carries
+   * "the highest input sequence visible in the applied cells"), and it is
+   * taken as it comes.
+   */
   private echoOfInputSeq = 0;
+  /**
+   * What the sender's stamps claim.
+   *
+   * The sender stamps every update with the highest input sequence its
+   * content includes (MLP spec annex N, N-1), so the lane's stamps only grow.
+   * They are the sender's claim about an object the receiver may not have
+   * applied, so the acknowledgement does not report them.
+   */
+  private laneInputSeqStamp = 0;
   private lastObjectId = 0;
 
   private appliedUpdates = 0;
@@ -163,6 +240,16 @@ export class MediaReceiverMachine {
   private waitingHeldUpdateId = 0;
   private waitingTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * The session's own zero.
+   *
+   * The acknowledgement's epoch is the session-relative millisecond clock
+   * (MLP spec §5.2), the same clock the reference implementation reports
+   * (`MediaReceiverMachine::session_ms`): the milliseconds since this
+   * machine started, not the page's own clock.
+   */
+  private readonly startedAtMs: number;
+
   constructor(options: MediaReceiverOptions = {}) {
     this.now = options.now ?? (() => performance.now());
     this.repairIntervalMs = options.repairIntervalMs ?? DEFAULT_REPAIR_INTERVAL_MS;
@@ -170,6 +257,12 @@ export class MediaReceiverMachine {
     this.rttMs = options.rttMs ?? (() => DEFAULT_RTT_MS);
     this.onAck = options.onAck;
     this.onRepair = options.onRepair;
+    this.startedAtMs = this.now();
+  }
+
+  /** The session-relative millisecond clock (MLP spec §5.2). */
+  get sessionMs(): number {
+    return Math.round(this.now() - this.startedAtMs);
   }
 
   /** The highest update the application reported as applied. */
@@ -189,12 +282,30 @@ export class MediaReceiverMachine {
 
   /** Whether the receiver believes it holds the sender's surface. */
   get isConverged(): boolean {
-    return this.converged && this.staleCells === 0;
+    return this.converged;
   }
 
-  /** The highest input sequence the receiver knows about. */
+  /**
+   * The highest input sequence the receiver's applied cells reflect.
+   *
+   * It is the driver's report, taken as it comes: a rebase drops the content
+   * that reflected the older input, so the value may go backwards, and the
+   * reference implementation takes it plainly
+   * (`MediaReceiverMachine::set_echo_of_input_seq`).
+   */
   get reflectedInputSeq(): number {
     return this.echoOfInputSeq;
+  }
+
+  /**
+   * The highest input sequence the sender's stamps claim.
+   *
+   * The stamps are the sender's claims (MLP spec annex N, N-1) and they only
+   * grow. They are what the driver reads when it reports the echo of the
+   * update it applied; they are not the applied content's echo.
+   */
+  get laneReflectedInputSeq(): number {
+    return this.laneInputSeqStamp;
   }
 
   /** The object id of the last media object the machine saw. */
@@ -221,35 +332,43 @@ export class MediaReceiverMachine {
   get ack(): ViewerAck {
     return {
       highestAppliedUpdateId: this.ackWindow.highestAppliedUpdateId,
-      ackBitmap: this.ackWindow.bitmapNumber(),
+      ackBitmap: this.ackWindow.bitmap,
       chainEpoch: this.chainEpoch,
       appliedCellCount: this.ackCellCount(),
       staleCells: this.staleCells,
-      converged: this.isConverged,
+      converged: this.converged,
       renderLatencyMs: this.renderLatencyMs,
       hasRenderLatencyMs: this.renderLatencyMs > 0,
-      echoOfInputSeq: this.echoOfInputSeq,
-      ackEpochMs: Math.round(this.now()),
+      echoOfInputSeq: this.reflectedInputSeq,
+      ackEpochMs: this.sessionMs,
     };
   }
 
   /** The ack grid, kept across reconnects (design §7.2's receiver row). */
-  get ackWire(): { highestAppliedUpdateId: number; ackBitmap: number; chainEpoch: number } {
+  get ackWire(): { highestAppliedUpdateId: number; ackBitmap: bigint; chainEpoch: number } {
     return {
       highestAppliedUpdateId: this.ackWindow.highestAppliedUpdateId,
-      ackBitmap: this.ackWindow.bitmapNumber(),
+      ackBitmap: this.ackWindow.bitmap,
       chainEpoch: this.chainEpoch,
     };
   }
 
-  /** The receiver's half of the resume body (MLP spec §7.1). */
+  /**
+   * The receiver's half of the resume body (MLP spec §7.1).
+   *
+   * The input sequence is the deduplication boundary: it is one past the
+   * highest input sequence the receiver knows about, which is the higher of
+   * the echo the application reported and the stamp the sender put on the
+   * objects it sent. The boundary never over-reports, so the sender never
+   * applies an input twice (MLP spec annex INV, INV-3).
+   */
   get resumeSnapshot(): MediaResumeSnapshot {
     return {
       ...emptyResumeSnapshot(),
       appliedUpdateId: this.ackWindow.highestAppliedUpdateId,
       chainEpoch: this.chainEpoch,
-      ackBitmap: this.ackWindow.bitmapNumber(),
-      inputSeqNext: this.echoOfInputSeq + 1,
+      ackBitmap: this.ackWindow.bitmap,
+      inputSeqNext: Math.max(this.echoOfInputSeq, this.laneInputSeqStamp) + 1,
     };
   }
 
@@ -270,7 +389,9 @@ export class MediaReceiverMachine {
       this.adoptEpoch(meta.chainEpoch);
     }
     if (meta.reflectsInputSeq !== undefined) {
-      this.echoOfInputSeq = Math.max(this.echoOfInputSeq, meta.reflectsInputSeq);
+      // The sender's stamp on the object it sent: the sender's claims are
+      // monotone, so the lane's stamp is accumulated with a maximum.
+      this.laneInputSeqStamp = Math.max(this.laneInputSeqStamp, meta.reflectsInputSeq);
     }
   }
 
@@ -320,12 +441,14 @@ export class MediaReceiverMachine {
   /**
    * Note the highest input sequence the applied cells reflect.
    *
-   * The sequence never goes backwards: the lane's own objects and the
-   * application both report it, and the highest one either of them saw is
-   * the one the ack echoes.
+   * The application owns this report: it says what *its* applied content
+   * reflects, and it may say less than it said before — a rebase drops the
+   * content that reflected the older input. The report is therefore taken as
+   * it comes, exactly as the reference implementation takes it
+   * (`MediaReceiverMachine::set_echo_of_input_seq`).
    */
   setEchoOfInputSeq(inputSeq: number): void {
-    this.echoOfInputSeq = Math.max(this.echoOfInputSeq, inputSeq);
+    this.echoOfInputSeq = inputSeq;
   }
 
   /**
@@ -333,7 +456,11 @@ export class MediaReceiverMachine {
    *
    * A newer epoch means the sender broke the chain: the receiver's *trust* in
    * the surface goes back to "all stale" without clearing the cells, the
-   * convergence breaks, and the applied window starts again (MLP spec §5.1).
+   * convergence breaks, and the sender starts an anchor plan (MLP spec §5.1).
+   *
+   * The applied window is *not* cleared: the receiver keeps the content it
+   * holds, so the updates it applied are still applied. The window says what
+   * the receiver holds, and an epoch is not an update.
    *
    * The epoch is adopted once. Whichever side sees it first — the wire
    * through {@link MediaReceiverMachine.onMediaObject} or the application
@@ -435,10 +562,20 @@ export class MediaReceiverMachine {
     return Math.max(1, this.cellCountOption?.() ?? 1);
   }
 
-  /** The cell count the ack reports; it never claims fewer than it calls stale. */
+  /**
+   * The cell count the ack reports.
+   *
+   * It is the application's own number (MLP spec §6.5.2): the machine reports
+   * it and never second-guesses it, exactly as the reference implementation
+   * reports the count its driver gave it (`MediaAck::applied_cell_count`).
+   * The grid size the application configured is the fallback for the time
+   * before it has reported one.
+   */
   private ackCellCount(): number {
-    const grid = this.reportedCellCount > 0 ? this.reportedCellCount : Math.max(0, this.cellCountOption?.() ?? 0);
-    return Math.max(grid, this.staleCells);
+    if (this.reportedCellCount > 0) {
+      return this.reportedCellCount;
+    }
+    return Math.max(0, this.cellCountOption?.() ?? 0);
   }
 
   /** Adopt a chain epoch, if it moved. */
@@ -447,28 +584,18 @@ export class MediaReceiverMachine {
       return false;
     }
     this.chainEpoch = epoch;
+    // The trust in the surface goes back to "all stale"; the content stays
+    // (MLP spec §5.1), and so does the window of what was applied.
     this.staleCells = this.gridSize();
     this.converged = false;
     this.epochBreaks += 1;
-    this.ackWindow.reset();
     this.emitAck();
     return true;
   }
 
   /** Remember one applied `(update, part)` pair. */
   private noteAppliedChunk(updateId: number, partIndex: number): void {
-    const key = chunkKey(updateId, partIndex);
-    if (this.appliedChunks.has(key)) {
-      return;
-    }
-    this.appliedChunks.add(key);
-    this.appliedChunkOrder.push(key);
-    while (this.appliedChunkOrder.length > APPLIED_CHUNK_WINDOW) {
-      const dropped = this.appliedChunkOrder.shift();
-      if (dropped !== undefined) {
-        this.appliedChunks.delete(dropped);
-      }
-    }
+    this.appliedChunks.add(chunkKey(updateId, partIndex));
   }
 
   /** Report the ack the next feedback carries. */

@@ -121,7 +121,7 @@ function harness(options: { resumeToken?: string | null; mediaSessionId?: string
       ...emptyResumeSnapshot(),
       appliedUpdateId: 12,
       chainEpoch: 3,
-      ackBitmap: 5,
+      ackBitmap: 5n,
       inputSeqNext: 44,
       pressedKeys: [65],
       pressedButtons: [0],
@@ -129,7 +129,7 @@ function harness(options: { resumeToken?: string | null; mediaSessionId?: string
     feedbackSource: () => ({
       ack: {
         highestAppliedUpdateId: 12,
-        ackBitmap: 5,
+        ackBitmap: 5n,
         chainEpoch: 3,
         appliedCellCount: 64,
         staleCells: 0,
@@ -361,7 +361,7 @@ describe("the media-lane client (MLP spec §6.3, §§7.2)", () => {
     test.client.handleFragment(mediaObject({ objectId: 1, updateId: 10, payload: new Uint8Array(500) }));
     test.client.sendAck({
       highestAppliedUpdateId: 10,
-      ackBitmap: 1,
+      ackBitmap: 1n,
       chainEpoch: 3,
       appliedCellCount: 64,
       staleCells: 0,

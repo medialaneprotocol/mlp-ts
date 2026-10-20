@@ -76,7 +76,11 @@ import {
   type ReconnectStageName,
   classifyMediaClose,
 } from "./media-resume";
-import { type MediaPathChangeEvent, type MediaPathSelector } from "./media-path";
+import {
+  type MediaPathChangeEvent,
+  type MediaPathSelector,
+} from "./media-path";
+import { type ViewerAck } from "./receiver";
 
 /** One transport message's worth of media-lane bytes. */
 export type MediaLaneTransport = {
@@ -106,7 +110,7 @@ export type MediaLaneConnectionState =
 
 /** What the lane reports on behalf of the receiver (the caller owns the data). */
 export type MediaFeedbackSource = {
-  ack: MediaAck;
+  ack: ViewerAck;
   fps: number;
   renderMsP50: number;
   renderMsP95: number;
@@ -406,7 +410,7 @@ export class MediaLaneClient {
   private jitterMs = 0;
   private lastGoodputBps = 0;
   private counters = emptyCounters();
-  private ackHint: MediaAck | null = null;
+  private ackHint: ViewerAck | null = null;
   private helloAck: MediaHelloAck | null = null;
   private outboundObjectId = 0x0100_0000;
   private lastPathHint: number | null = null;
@@ -464,7 +468,7 @@ export class MediaLaneClient {
   }
 
   /** The last ack the lane sent (diagnostics and the resume snapshot). */
-  get sentAckHint(): MediaAck | null {
+  get sentAckHint(): ViewerAck | null {
     return this.ackHint;
   }
 
@@ -628,9 +632,14 @@ export class MediaLaneClient {
    * acks, 2 for reports"); the FEEDBACK class has no body discriminator, so
    * the priority is what separates the two protobuf bodies on the wire.
    */
-  sendAck(ack: MediaAck): void {
+  sendAck(ack: ViewerAck): void {
     this.ackHint = ack;
-    this.sendObject(MediaFragmentClass.FEEDBACK, MediaFragmentFlags.NONE, MediaAck.encode(ack).finish(), 0);
+    this.sendObject(
+      MediaFragmentClass.FEEDBACK,
+      MediaFragmentFlags.NONE,
+      MediaAck.encode(wireAck(ack)).finish(),
+      0,
+    );
   }
 
   /** Queue a `MediaProbe` echo; it rides the next report (§§6.2). */
@@ -680,7 +689,7 @@ export class MediaLaneClient {
       duplicatedObjects: this.windowDuplicated,
       reorderedObjects: this.windowReordered,
       windowMs,
-      ack: source.ack,
+      ack: wireAck(source.ack),
       probes: this.pendingProbes.splice(0, this.pendingProbes.length),
       bufferedAmountBytes: Math.round(this.transport.bufferedAmount()),
       displayFps: Math.round(source.fps),
@@ -885,17 +894,16 @@ export class MediaLaneClient {
     // media id the intermediary was never paired on.
     if (token && mediaSessionId.trim().length > 0) {
       const snapshot = this.options.resumeSnapshot();
-      const resume: MediaResume = {
+      const resume: MediaResume = wireResume(snapshot, {
         resumeToken: token,
         appliedUpdateId: snapshot.appliedUpdateId,
         chainEpoch: snapshot.chainEpoch,
-        ackBitmap: snapshot.ackBitmap,
         inputSeqNext: snapshot.inputSeqNext,
         pressedKeys: snapshot.pressedKeys,
         pressedButtons: snapshot.pressedButtons,
         activePath: snapshot.activePath || MediaPathKind.WS,
         dcTransportId: "",
-      };
+      });
       this.sendControlObject({ resume });
     }
   }
@@ -1261,6 +1269,34 @@ function emptyCounters(): MediaLaneCounters {
     evictedObjects: 0,
     droppedDuplicates: 0,
   };
+}
+
+/**
+ * A 64-bit field as the generated encoder takes it.
+ *
+ * The generated client models 64-bit fields as JavaScript numbers, so its
+ * message types cannot express the acknowledgement window's upper 11 bits.
+ * The protobuf writer those types call takes the value as a `bigint` and
+ * emits the full 64-bit varint, so the browser carries the window as a
+ * `bigint` and hands the generated encoder that value. A zero window travels
+ * as the number zero: the generated encoder omits a default field, and the
+ * reference implementation's encoder omits it too.
+ */
+function wireUint64(value: bigint): bigint | number {
+  return value === 0n ? 0 : value;
+}
+
+/** The acknowledgement as the generated encoder takes it. */
+export function wireAck(ack: ViewerAck): MediaAck {
+  return { ...ack, ackBitmap: wireUint64(ack.ackBitmap) } as unknown as MediaAck;
+}
+
+/** The resume body as the generated encoder takes it. */
+export function wireResume(
+  snapshot: MediaResumeSnapshot,
+  body: Omit<MediaResume, "ackBitmap">,
+): MediaResume {
+  return { ...body, ackBitmap: wireUint64(snapshot.ackBitmap) } as unknown as MediaResume;
 }
 
 function jitter(random: () => number): number {

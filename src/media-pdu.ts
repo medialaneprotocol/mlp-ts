@@ -23,9 +23,10 @@ import {
   TARGET_FRAGMENT_PAYLOAD,
   MAX_WS_FRAGMENT,
 } from "./protocol-constants";
+import { FifoSet } from "./fifo-set";
 
-/** `magic` — `52 4D 4C 50` ("RMLP", MLP spec §5.2). */
-export const MEDIA_FRAGMENT_MAGIC = [0x52, 0x4d, 0x4c, 0x50] as const;
+/** `magic` — `4D 4C 50 00` ("MLP\0", MLP spec §5.2). */
+export const MEDIA_FRAGMENT_MAGIC = [0x4d, 0x4c, 0x50, 0x00] as const;
 
 /**
  * The one fragment version this receiver speaks. It is the MLP protocol version
@@ -542,6 +543,22 @@ export function readTlvU32(carrier: MediaTlvCarrier, type: number): number | nul
   return new DataView(value.buffer, value.byteOffset, value.byteLength).getUint32(0, true);
 }
 
+/**
+ * Read a TLV's pair of 16-bit values (`PART`: the part index and the part
+ * count).
+ */
+export function readTlvU16Pair(
+  carrier: MediaTlvCarrier,
+  type: number,
+): { first: number; second: number } | null {
+  const value = readTlvValue(carrier, type);
+  if (!value || value.byteLength !== 4) {
+    return null;
+  }
+  const view = new DataView(value.buffer, value.byteOffset, value.byteLength);
+  return { first: view.getUint16(0, true), second: view.getUint16(2, true) };
+}
+
 export function readTlvU64(carrier: MediaTlvCarrier, type: number): number | null {
   const value = readTlvValue(carrier, type);
   if (!value || value.byteLength !== 8) {
@@ -621,8 +638,15 @@ export function defaultObjectAssemblerConfig(rttMs: number): ObjectAssemblerConf
 export class MediaObjectAssembler {
   private config: ObjectAssemblerConfig;
   private readonly open = new Map<number, OpenObject>();
-  private readonly seen = new Map<number, Set<number>>();
-  private readonly seenOrder: number[] = [];
+  /**
+   * The `(object_id, fragment_index)` dedupe window (MLP spec §5.4 step 5).
+   *
+   * It is the reference implementation's shape — a set and a FIFO order over
+   * the same keys — with the pair packed into one number: the object id is a
+   * u32 and the fragment index a u16, so `id × 2^16 + index` names the pair
+   * exactly.
+   */
+  private readonly seen: FifoSet<number>;
   private openBytes = 0;
   private expiredTotal = 0;
   private evictedTotal = 0;
@@ -632,6 +656,7 @@ export class MediaObjectAssembler {
 
   constructor(config: ObjectAssemblerConfig) {
     this.config = config;
+    this.seen = new FifoSet<number>(config.dedupeWindow);
   }
 
   setAssemblyTimeout(rttMs: number): void {
@@ -824,143 +849,115 @@ export class MediaObjectAssembler {
   }
 
   private isDuplicate(objectId: number, fragmentIndex: number): boolean {
-    const fragments = this.seen.get(objectId);
-    if (fragments?.has(fragmentIndex)) {
+    const key = dedupeKey(objectId, fragmentIndex);
+    if (this.seen.has(key)) {
       return true;
     }
-
-    if (!fragments) {
-      this.seen.set(objectId, new Set([fragmentIndex]));
-      this.seenOrder.push(objectId);
-      while (this.seenOrder.length > this.config.dedupeWindow) {
-        const dropped = this.seenOrder.shift();
-        if (dropped !== undefined) {
-          this.seen.delete(dropped);
-        }
-      }
-      return false;
-    }
-
-    fragments.add(fragmentIndex);
+    this.seen.add(key);
     return false;
   }
+}
+
+/** The `(object_id, fragment_index)` pair, packed into one number. */
+function dedupeKey(objectId: number, fragmentIndex: number): number {
+  return objectId * 65_536 + fragmentIndex;
 }
 
 // ── The 64-id ack grid (MLP spec §6.2, §§7.5.1) ────────────────────────────────
 
 /**
+ * The width of the applied-update window: the acknowledgement's bitmap is a
+ * `uint64`, so the window is 64 bits wide (MLP spec §5.2).
+ */
+export const ACK_WINDOW_BITS = 64;
+
+/** The mask of the window's 64 bits. */
+const WINDOW_MASK = (1n << BigInt(ACK_WINDOW_BITS)) - 1n;
+
+/**
  * The receiver's applied-update window.
  *
- * `bit i` means update `highestAppliedUpdateId - i` was applied. The wire field
- * is a `uint64`; the generated decoder/encoder represents 64-bit values as a
- * JavaScript number, so the window keeps the low 53 bits exactly and reports
- * when it had to truncate (the sender then re-sends those cells, which is the
- * conservative direction).
+ * `bit i` means update `highestAppliedUpdateId - i` was applied, and the wire
+ * field is a `uint64`: the window is 64 bits wide and the browser holds it in
+ * a `bigint`, so every bit of it is exact. A JavaScript number cannot hold
+ * the upper 11 bits, and an acknowledgement that reports 53 bits where the
+ * protocol says 64 is a *different receiver*: the sender reads the missing
+ * bits as "not applied" and re-sends cells the receiver already holds.
+ *
+ * The window is the mirror of the reference implementation's applied window
+ * (`mlp_core::media::receiver::MediaReceiverMachine`): it slides one id at a
+ * time, holds the last 64 ids, marks an update that fell out of the window no
+ * more, and collapses to the new update alone when the jump is 64 ids or more.
  */
 export class MediaAckWindow {
   private highest = 0;
-  /** Bits 0..31 of the window (bit 0 = the highest applied update). */
-  private lo = 0;
-  /** Bits 32..63 of the window. */
-  private hi = 0;
-  private truncated = 0;
+  /** The window's 64 bits; bit 0 names the highest applied update. */
+  private bits = 0n;
 
   get highestAppliedUpdateId(): number {
     return this.highest;
   }
 
-  /** Bitmap bits that could not be expressed as a JS number (diagnostics). */
-  get truncatedBits(): number {
-    return this.truncated;
+  /** The window's 64 bits, exactly. */
+  get bitmap(): bigint {
+    return this.bits;
   }
 
   reset(): void {
     this.highest = 0;
-    this.lo = 0;
-    this.hi = 0;
-    this.truncated = 0;
+    this.bits = 0n;
   }
 
   /**
-   * The bitmap value for the next ack.
+   * Whether an update id inside the window is marked applied.
    *
-   * `ack_bitmap` is a `uint64`, and the generated codec moves 64-bit values
-   * through a JavaScript number, so bits 53..63 cannot be transported: they
-   * are counted here and left clear. The sender then treats those updates as
-   * unacked and re-sends their cells, which is the conservative direction
-   * (§§7.5.2's ring-miss rule applies the same reasoning and counts it).
+   * Update id 0 is not an update id: the sender's ids start at 1, so the
+   * window never reports it as applied.
    */
-  bitmapNumber(): number {
-    const lowBits = this.lo >>> 0;
-    const highBits = this.hi & 0x1f_ffff;
-    this.truncated += popcount32(this.hi >>> 21);
-    return lowBits + highBits * 2 ** 32;
-  }
-
-  /** Whether a update id inside the window is marked applied. */
   has(updateId: number): boolean {
     if (updateId < 1 || updateId > this.highest) {
       return false;
     }
     const distance = this.highest - updateId;
-    if (distance < 32) {
-      return ((this.lo >>> distance) & 1) === 1;
+    if (distance >= ACK_WINDOW_BITS) {
+      return false;
     }
-    if (distance < 64) {
-      return ((this.hi >>> (distance - 32)) & 1) === 1;
-    }
-    return false;
+    return (this.bits & (1n << BigInt(distance))) !== 0n;
   }
 
-  /** Mark a update applied; older ids than the window are ignored. */
+  /**
+   * Mark an update applied.
+   *
+   * A newer id slides the window: the window shifts by the distance and the
+   * new id takes bit 0. A jump of 64 ids or more leaves the window holding
+   * the new update alone. An id that has fallen out of the window is not
+   * marked: the window is 64 ids wide and it says what it holds, not what it
+   * once held.
+   */
   mark(updateId: number): void {
-    if (updateId < 1) {
-      return;
-    }
-
     if (updateId > this.highest) {
-      const shift = Math.min(64, updateId - this.highest);
-      const nextLo = shift === 0 ? this.lo : shift >= 64 ? 0 : (this.lo << shift) >>> 0;
-      const nextHi = shift === 0
-        ? this.hi
-        : shift >= 64
-          ? 0
-          : shift === 32
-            ? this.lo
-            : shift > 32
-              ? (this.lo << (shift - 32)) >>> 0
-              : ((this.hi << shift) | (this.lo >>> (32 - shift))) >>> 0;
-      this.lo = (nextLo | 1) >>> 0;
-      this.hi = nextHi >>> 0;
+      const shift = updateId - this.highest;
+      this.bits =
+        shift >= ACK_WINDOW_BITS
+          ? 1n
+          : ((this.bits << BigInt(shift)) | 1n) & WINDOW_MASK;
       this.highest = updateId;
       return;
     }
 
     const distance = this.highest - updateId;
-    if (distance < 32) {
-      this.lo = (this.lo | (1 << distance)) >>> 0;
-    } else if (distance < 64) {
-      this.hi = (this.hi | (1 << (distance - 32))) >>> 0;
+    if (distance < ACK_WINDOW_BITS) {
+      this.bits |= 1n << BigInt(distance);
     }
   }
 
-  /** Seed the window from a resume ack (`next_update_id` is exclusive). */
+  /** Seed the window from a resume ack (`applied_update_id` is the highest applied). */
   seedFromResume(highestAppliedUpdateId: number): void {
     this.reset();
     this.highest = Math.max(0, highestAppliedUpdateId);
     if (this.highest > 0) {
-      this.lo = 1;
+      this.bits = 1n;
     }
   }
-}
-
-function popcount32(value: number): number {
-  let remaining = value >>> 0;
-  let count = 0;
-  while (remaining !== 0) {
-    remaining &= remaining - 1;
-    count += 1;
-  }
-  return count;
 }
 

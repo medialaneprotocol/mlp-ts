@@ -166,7 +166,7 @@ describe("media close classification (MLP spec §6.3)", () => {
     expect(emptyResumeSnapshot()).toEqual({
       appliedUpdateId: 0,
       chainEpoch: 0,
-      ackBitmap: 0,
+      ackBitmap: 0n,
       inputSeqNext: 1,
       pressedKeys: [],
       pressedButtons: [],

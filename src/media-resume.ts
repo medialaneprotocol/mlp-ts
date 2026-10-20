@@ -144,7 +144,13 @@ export class ReconnectLadder {
 export type MediaResumeSnapshot = {
   appliedUpdateId: number;
   chainEpoch: number;
-  ackBitmap: number;
+  /**
+   * The acknowledgement window the receiver held.
+   *
+   * It is the protocol's 64-bit bitmap (MLP spec §5.2), so it is a `bigint`:
+   * a JavaScript number cannot hold the window's upper 11 bits.
+   */
+  ackBitmap: bigint;
   inputSeqNext: number;
   pressedKeys: number[];
   pressedButtons: number[];
@@ -155,7 +161,7 @@ export function emptyResumeSnapshot(): MediaResumeSnapshot {
   return {
     appliedUpdateId: 0,
     chainEpoch: 0,
-    ackBitmap: 0,
+    ackBitmap: 0n,
     inputSeqNext: 1,
     pressedKeys: [],
     pressedButtons: [],
