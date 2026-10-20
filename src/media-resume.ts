@@ -6,7 +6,7 @@
  * - {@link MediaResumeStore} — the resume token (opaque to the browser, §§8.1)
  *   plus the receiver state the `MediaResume` body carries (§§6.3). It survives
  *   the socket; the component is never recreated (§7.6).
- * - {@link ReconnectLadder} — the mirror of `rm_sans_io::media::resume`: no
+ * - {@link ReconnectLadder} — the mirror of `mlp_core::media::resume`: no
  *   give-up, `delay_n = clamp(max(500 ms, RTT) × 2^(n-1), 500 ms, 30 s) + jitter`,
  *   control retries for attempts 1–2, a bootstrap refresh from attempt 3, and
  *   the `Suspended` cadence from attempt 6.

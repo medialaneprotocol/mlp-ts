@@ -310,7 +310,7 @@ describe("MLP object assembly (MLP spec §5.4)", () => {
     assembler.accept(first, 0, 0);
     // Step 6's reject refuses the fragment, not the object: the reference
     // implementation returns `Dropped{FragmentMismatch}` with `self.open`
-    // untouched (`rm_sans_io::media::object::ObjectAssembler::accept`).
+    // untouched (`mlp_core::media::object::ObjectAssembler::accept`).
     expect(assembler.accept(mismatched, 1, 0)).toEqual({
       kind: "reject",
       reason: "FRAGMENT_MISMATCH",

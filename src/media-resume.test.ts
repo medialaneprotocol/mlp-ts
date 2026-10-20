@@ -61,7 +61,7 @@ describe("the RTT-relative reconnect ladder (MLP spec §8.4)", () => {
     }
     // 0 + 1 + 2 + 4 + 8 + 16 + 30 = 61 s: the specification's "31 s at 1 s base"
     // counts six attempts, and the ladder's own 30 s cap governs the sixth
-    // (the cap is what `rm_sans_io::media::resume::ReconnectLadder` enforces).
+    // (the cap is what `mlp_core::media::resume::ReconnectLadder` enforces).
     expect(total).toBe(61_000);
     expect(ladder.delayFor(6)).toBe(30_000);
   });

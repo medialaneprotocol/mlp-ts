@@ -1,7 +1,7 @@
 /**
  * MLP v1 — the media-lane fragment codec and object assembler (MLP spec §5).
  *
- * This module is the receiver's mirror of `rm_sans_io::media::pdu` and
+ * This module is the receiver's mirror of `mlp_core::media::pdu` and
  * `::object` (W1). It is byte-for-byte compatible: little-endian throughout,
  * the same validation order, the same reject vocabulary, and the same
  * carrier rules (1..N fragments on a stream carrier, exactly one on a
@@ -29,7 +29,7 @@ export const MEDIA_FRAGMENT_MAGIC = [0x52, 0x4d, 0x4c, 0x50] as const;
 
 /**
  * The one fragment version this receiver speaks. It is the MLP protocol version
- * itself (`rm_sans_io::media::pdu::MEDIA_PROTOCOL_VERSION`), so the header byte
+ * itself (`mlp_core::media::pdu::MEDIA_PROTOCOL_VERSION`), so the header byte
  * and the handshake's `media_protocol_version` cannot drift apart.
  */
 export const MEDIA_FRAGMENT_VERSION = MEDIA_PROTOCOL_VERSION;
@@ -738,7 +738,7 @@ export class MediaObjectAssembler {
       // rule — and never by one stray fragment, so a corrupting link cannot
       // destroy an in-flight object and the already-arrived parts stay usable.
       // The reference implementation is
-      // `rm_sans_io::media::object::ObjectAssembler::accept`, whose mismatch
+      // `mlp_core::media::object::ObjectAssembler::accept`, whose mismatch
       // arm returns `Dropped { reason: FragmentMismatch }` without touching
       // `self.open`.
       return { kind: "reject", reason: "FRAGMENT_MISMATCH" };
