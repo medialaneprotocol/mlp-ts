@@ -29,7 +29,7 @@
   },
   "dependencies": {
     "@medialaneprotocol/proto": "file:../mlp-proto",
-    "@tessellio/ts": "file:../../tessellio-polyrepo/tessellio-ts"
+    "@tessellio/ts": "file:../../tessellio/tessellio-ts"
   },
   "devDependencies": {
     "@bufbuild/protobuf": "^2.16.0",
