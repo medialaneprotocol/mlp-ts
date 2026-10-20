@@ -48,6 +48,8 @@ applied.
 | `media-path` | carrier selection and hysteresis |
 | `protocol-constants` | the shared constants and the RTT-relative timeouts |
 | `receiver` | the receiver machine: the applied window, the acknowledgement, the chain epoch, the repair request |
+| `fifo-set` | the bounded windows: a set and a FIFO order over the same keys |
+| `conformance` | the corpus reader and the receiver's replay of it — the gate's half, not the package's API |
 
 ## The two rules that are load-bearing
 
@@ -56,6 +58,47 @@ applied.
   reach the object assembler.
 - A body is classified by its class, so a media-class payload is handed to
   the codec only after the objection layer says it is complete.
+
+## The conformance corpus
+
+The corpus in [`mlp-conformance`](../mlp-conformance) is the protocol's
+shared, executable description of what it promises: the tier profiles, the
+acceptance scenarios, and the golden decision traces the reference runner
+produces. The reference implementation regenerates those traces and the
+corpus's own gate compares the bytes; this package is the browser's half of
+the same gate.
+
+`src/conformance.ts` reads the corpus and replays each scenario through this
+package's receiver machine: the corpus's media objects travel as MLP
+fragments, they are parsed and assembled, the application reports what it
+applied, and the machine's decisions are compared with the published ones —
+the applied window's progression, the acknowledgements the window reports,
+the chain epoch, and the validity of every acknowledgement.
+
+The corpus is a sibling repository and a data file; it is never copied into
+this one. The reader resolves it from `MLP_CONFORMANCE_DIR` or from the
+sibling directory, and a corpus that is absent fails the suite: a gate that
+compared nothing would pass.
+
+```bash
+MLP_CONFORMANCE_DIR=../mlp-conformance npm test
+```
+
+## The receiver's per-update budget
+
+The transport has to work fast even on a poor link, and on a poor link the
+receiver's own work is the only part of the path the browser controls. The
+budget suite measures it over the corpus's own scenarios — replayed often
+enough that the dedupe window and the applied-part record are full, which is
+the steady state of a real lane — and holds it to a budget:
+
+```
+MEASURE_JS receiver budget: updates=4608 assembly=7.9us machine=1.5us ack=0.1us repair=0.4us total=10.2us
+```
+
+The numbers are the medians over the corpus's updates; the budgets are those
+medians plus a margin, so a real growth in the receiver's cost fails the
+suite and the run-to-run spread does not.
 
 ## Using it
 
@@ -97,3 +140,6 @@ than a published package:
 The protocol's own repositories are siblings of this one; a codec lives in its
 own organisation's repository, one level further out. A checkout that lays
 the two organisations out side by side installs this package unchanged.
+
+The conformance corpus is a sibling as well (`../mlp-conformance`), and the
+gate reads it from there.
