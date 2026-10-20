@@ -73,7 +73,7 @@ export type ScreenStreamOptions = {
   onResync?: (heldUpdateId: number, reason: ResyncReason) => void;
   /** Output the lane reports in `MediaFeedback`/`MediaAck`. */
   onAckNow?: (ack: ViewerAck) => void;
-  /** The block grid size the ack advertises (MLP spec §6.5.1). */
+  /** The cell grid size the ack advertises (MLP spec §6.5.1). */
   appliedBlockCount?: () => number;
   /** The highest input sequence reflected by an applied update (MLP spec §5). */
   onMediaState?: (state: { chainEpoch: number; staleBlocks: number; appliedUpdateId: number }) => void;
@@ -152,7 +152,7 @@ export class ScreenStream {
     return this.chainEpoch;
   }
 
-  /** The receiver's own block-stale estimate (`MediaAck.stale_blocks`). */
+  /** The receiver's own cell-stale estimate (`MediaAck.stale_blocks`). */
   get staleBlockCount(): number {
     return this.staleBlocks;
   }
@@ -564,7 +564,7 @@ export class ScreenStream {
 
   private emitResync(held: number, reason: ResyncReason): void {
     // Repair is ack-driven on the media lane (D-7): the sender re-encodes the
-    // blocks the receiver's `MediaAck` leaves pending, so nothing is sent here.
+    // cells the receiver's `MediaAck` leaves pending, so nothing is sent here.
     // The history is diagnostics for the receiver's own state.
     this.resyncHistory.push({ reason, held });
     if (this.resyncHistory.length > RESYNC_HISTORY_LIMIT) {

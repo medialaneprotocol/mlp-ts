@@ -81,7 +81,7 @@ function createTestCanvas(width: number, height: number): TestCanvas {
   };
 }
 
-/** One stored-DEFLATE block; the vectors' envelope, hand-verifiable. */
+/** One stored-DEFLATE cell; the vectors' envelope, hand-verifiable. */
 function storedDeflate(raw: Uint8Array): Uint8Array {
   const payload = new Uint8Array(raw.length + 5);
   payload[0] = 0x01;

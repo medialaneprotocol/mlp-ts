@@ -175,7 +175,7 @@ function scrollOps(width: number, height: number, seed: number): Uint8Array<Arra
   return writer.bytes();
 }
 
-/** A typing-class delta: a 600×40 text block, ~4 k ops. */
+/** A typing-class delta: a 600×40 text cell, ~4 k ops. */
 function typingOps(width: number, height: number, seed: number): Uint8Array<ArrayBuffer> {
   const random = lcg(seed);
   const writer = opWriter(256 * 1024);
