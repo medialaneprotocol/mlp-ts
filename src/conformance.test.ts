@@ -2,11 +2,11 @@
  * The browser's end of the conformance gate (MLP spec §11.1, layer L3).
  *
  * The corpus in `mlp-conformance` is the protocol's shared, executable
- * description of what it promises: the tier profiles, the acceptance
- * scenarios, and the golden decision traces the reference runner produces.
- * The reference implementation regenerates those traces and the corpus's own
- * gate compares the bytes. This suite is the browser's half: it replays the
- * same corpus through this package's receiver machine and requires the
+ * description of what it promises: the acceptance scenarios, the matrix that
+ * maps the specification's stories onto them, and the golden decision traces
+ * the harness produces. The harness regenerates those traces and the corpus's
+ * own gate compares the bytes. This suite is the browser's half: it replays
+ * the same corpus through this package's receiver machine and requires the
  * machine to decide the way the published trace says the protocol decides.
  *
  * The corpus is a sibling repository — a data file, not code — and it is
@@ -23,6 +23,8 @@ import {
   publishedReceiverDecisions,
   replayScenario,
   resolveCorpusRoot,
+  type CorpusLinkProfile,
+  type CorpusStep,
   type ReplayResult,
 } from "./conformance";
 import type { ViewerAck } from "./receiver";
@@ -48,19 +50,20 @@ describe("the conformance corpus", () => {
     }
   });
 
-  it("names a link profile every scenario can resolve", () => {
+  it("carries a link profile every scenario can resolve", () => {
     for (const id of scenarioIds) {
       const scenario = corpus.scenarios.get(id);
       expect(scenario).toBeDefined();
+      expect(scenario?.link.mtu_bytes).toBeGreaterThan(0);
       const profiles = (scenario?.steps ?? [])
         .filter(
-          (step): step is { Link: { profile: string } } =>
-            typeof step === "object" && "Link" in step,
+          (step): step is Extract<CorpusStep, { SetLink: { profile: CorpusLinkProfile } }> =>
+            typeof step === "object" && "SetLink" in step,
         )
-        .map((step) => step.Link.profile);
+        .map((step) => step.SetLink.profile);
       expect(profiles.length).toBeGreaterThan(0);
       for (const profile of profiles) {
-        expect(corpus.profiles.has(profile), `${id} names the profile ${profile}`).toBe(true);
+        expect(profile.mtu_bytes).toBeGreaterThan(0);
       }
     }
   });

@@ -31,7 +31,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildScenarioFragments,
-  carrierForProfile,
   loadCorpus,
   resolveCorpusRoot,
   type ScenarioFragments,
@@ -60,14 +59,10 @@ type Scene = {
 function buildScenes(base: number): Scene[] {
   const scenes: Scene[] = [];
   for (const [scenarioIndex, id] of scenarioIds.entries()) {
-    const profile = corpus.profiles.get("t3");
-    if (!profile) {
-      throw new Error("the corpus has no t3 profile");
-    }
-    const carrier = carrierForProfile(profile);
     const fragments: Uint8Array[] = [];
     const ids: number[] = [];
     let cells = 0;
+    let carrier: "stream" | "datagram" = "stream";
     for (let pass = 0; pass < PASSES; pass += 1) {
       // A long session does not send the same object id twice: every pass
       // gets its own range, and the warm-up gets a range of its own. The
@@ -78,6 +73,7 @@ function buildScenes(base: number): Scene[] {
         updateId: range,
       });
       cells = scene.cells;
+      carrier = scene.carrier;
       fragments.push(...scene.fragments);
       ids.push(...scene.updateIds);
     }

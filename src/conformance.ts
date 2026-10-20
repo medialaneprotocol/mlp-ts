@@ -6,31 +6,33 @@
  * promises. It lives in its own repository — `mlp-conformance` — beside this
  * one, and it holds three things:
  *
- * - `profiles/` — the link profiles, one JSON document per profile;
- * - `scenarios/` — the acceptance stories, as step scripts;
- * - `decisions/` — the golden decision traces the reference runner produces.
+ * - `scenarios/` — the acceptance stories, as step scripts over a modelled
+ *   link, in the harness's scenario format;
+ * - `decisions/` — the golden decision traces the harness produces;
+ * - `matrix.json` — the map of the specification's acceptance stories onto
+ *   the scenarios that cover them.
  *
  * This module reads that corpus and replays the *receiver's* half of it
- * through this package's machine. It is the browser's end of the L3 gate: the
- * reference implementation regenerates the traces and the gate compares the
- * bytes; the browser replays the same corpus and its machine must decide the
- * same way.
+ * through this package's machine. It is the browser's end of the L3 gate:
+ * the harness regenerates the traces and the gate compares the bytes; the
+ * browser replays the same corpus and its machine must decide the way the
+ * published trace says the protocol decides.
  *
  * WHAT THE CORPUS PUBLISHES, AND WHAT THE BROWSER CHECKS
  * ========================================================
  *
- * A decision trace is the *simulator's* record: it holds the updates the
- * sender emitted, the acknowledgements the lane carried, the plans, the lane
- * states, the counters and the link's statistics. The receiver's own
- * decisions inside it are:
+ * A decision trace is the *harness's* record: it holds the link's events,
+ * the updates the sender emitted, the acknowledgements, the plans, the lane
+ * states, the inputs, the echoes, the invariant outcomes, the measurements
+ * and the digest. The receiver's own decisions inside it are:
  *
- * - the acknowledgement timeline — the highest applied update id the receiver
- *   reported, at every acknowledgement the lane carried;
+ * - the acknowledgement timeline — the highest applied update id the
+ *   receiver reported, at every acknowledgement the lane carried;
  * - the applied count;
  * - the chain epoch the receiver held at the end.
  *
- * The replay drives this package's machine with the published progression and
- * requires:
+ * The replay drives this package's machine with the published progression
+ * and requires:
  *
  * 1. the machine's applied-window high-water mark to advance exactly as the
  *    published one does;
@@ -74,35 +76,43 @@ import {
 } from "./media-pdu";
 import { MediaReceiverMachine, isAckApplied, validateAck, type ViewerAck } from "./receiver";
 
-/** One link profile (`profiles/<id>.json`). */
-export type CorpusProfile = {
-  schema: number;
-  id: string;
-  kind: string;
-  tier: string;
-  rtt_ms: number;
-  jitter_ms: number;
-  jitter_dist: string;
-  loss_permille: number;
-  burst_loss: number | null;
+/** One direction of a link (`scenarios/<id>.json`). */
+export type CorpusDirection = {
+  rate_bps: number;
+  propagation_us: number;
+  jitter: Record<string, { amplitude_us: number } | null>;
+  loss: Record<string, { permille: number } | null>;
   reorder_permille: number;
   duplicate_permille: number;
-  rate_bps_down: number;
-  rate_bps_up: number;
+  queue_cap_bytes: number;
+  burst_bytes: number;
+  reorder_window_us: number;
+  duplicate_delay_us: number;
+  extra_delay_us: number;
+};
+
+/** A link profile, as the corpus carries it. */
+export type CorpusLinkProfile = {
+  down: CorpusDirection;
+  up: CorpusDirection;
   mtu_bytes: number;
-  outage_schedule: { start_ms: number; dur_ms: number }[];
-  ack_delay_ms: number;
+  outages: { windows: unknown[] };
   seed: number;
 };
 
 /** One step of a scenario (`scenarios/<id>.json`). */
 export type CorpusStep =
-  | { Link: { profile: string } }
-  | { Advance: number }
-  | { CaptureChange: { x: number; y: number; width: number; height: number } }
-  | { ViewerInput: { PointerMove?: { x: number; y: number } } }
-  | { Assert: string }
-  | { PathSwitch: string }
+  | { SetLink: { profile: CorpusLinkProfile } }
+  | { Advance: { ms: number } }
+  | {
+      CaptureChange: {
+        region: { x_px: number; y_px: number; width_px: number; height_px: number };
+      };
+    }
+  | { ViewerInput: { event: Record<string, unknown> } }
+  | { PathSwitch: { path: string } }
+  | { Assert: { invariant: string } }
+  | { ScheduleOutage: { window: unknown } }
   | "ViewerDisconnect"
   | "ViewerReconnect"
   | "HostReconnect";
@@ -110,98 +120,123 @@ export type CorpusStep =
 /** One acceptance story (`scenarios/<id>.json`). */
 export type CorpusScenario = {
   schema: number;
-  id: string;
-  tiers: string[];
-  story: string;
+  name: string;
   tier: string;
-  stage: string;
-  intent: string;
-  simulator_cases: string[];
-  receivers: number;
+  seed: number;
+  link: CorpusLinkProfile;
+  prior_bps: number | null;
+  grid: { width_px: number; height_px: number; cell_size_px: number };
   steps: CorpusStep[];
+  faults: Record<string, boolean>;
 };
 
 /** One emitted update in a trace. */
 export type CorpusUpdate = {
-  at_ms: number;
+  at_us: number;
   update_id: number;
   kind: string;
   cells: number;
   bytes: number;
+  anchor: boolean;
+  plan_id: number | null;
+  reflects_input_seq: number;
 };
 
 /** One acknowledgement in a trace. */
 export type CorpusAck = {
-  at_ms: number;
+  at_us: number;
   highest_applied_update_id: number;
   pending_cells: number;
   converged: boolean;
 };
 
 /** One plan event in a trace. */
-export type CorpusPlan = { at_ms: number; plan_id: number; event: string; cells: number };
+export type CorpusPlan = {
+  at_us: number;
+  plan_id: number;
+  event: string;
+  cells: number;
+};
 
 /** One lane-state change in a trace. */
-export type CorpusState = { at_ms: number; state: string };
+export type CorpusState = { at_us: number; state: string };
 
-/** The trace's counters. */
-export type CorpusCounters = {
-  updates_sent: number;
+/** One input the peer was given. */
+export type CorpusInput = {
+  at_us: number;
+  seq: number;
+  kind: string;
+  applied: boolean;
+  expired: boolean;
+};
+
+/** One measured echo. */
+export type CorpusEcho = { input_seq: number; echo_ms: number; at_us: number };
+
+/** The trace's measurements. */
+export type CorpusMeasurements = {
+  echo_p50_ms: number | null;
+  echo_p95_ms: number | null;
+  echo_max_ms: number | null;
+  echo_samples: number;
+  convergence_ms: number | null;
+  convergences: number;
+  bytes_down: number;
+  bytes_up: number;
   updates_applied: number;
-  updates_acked: number;
-  updates_gapped: number;
-  fragments_sent: number;
-  bytes_sent: number;
+  updates_sent: number;
   objects_delivered: number;
   objects_dropped: number;
-  acks: number;
-  feedback: number;
-  plans_started: number;
-  converged_observations: number;
+  objects_lost: number;
+  rtt_ms: number;
+  pace_bps: number;
   pending_cells: number;
-  last_converge_ms: number | null;
-  echoes: [number, number][];
-  input_submitted: number;
-  input_applied: number;
-  input_expired: number;
-  input_dropped: number;
-  park_cycles: number;
-  parks: number;
-  echo_outliers: number;
-  stale_applies_skipped: number;
-  canvas_behind_cells: number;
-  pacer_waits: number;
-  max_pacer_wait_ms: number;
-  state_changes: number;
-  hop_dropped: number;
-  probes_lost: number;
-  viewer_lost_objects: number;
-  final_state: string;
   cells: number;
-  epoch: number;
+  duration_ms: number;
 };
 
 /** The golden decision trace of one scenario (`decisions/<id>.json`). */
 export type CorpusTrace = {
-  name: string;
-  tier: string;
-  duration_ms: number;
-  updates: CorpusUpdate[];
-  acks: CorpusAck[];
-  plans: CorpusPlan[];
-  states: CorpusState[];
-  violations: { at_ms: number; invariant: string; detail: string }[];
-  counters: CorpusCounters;
-  link: Record<string, number>;
+  schema: number;
+  scenario: {
+    name: string;
+    tier: string;
+    seed: number;
+    steps: number;
+    duration_ms: number;
+    faults: string[];
+  };
+  link: {
+    profile: CorpusLinkProfile;
+    down: unknown;
+    up: unknown;
+    events: unknown[];
+  };
+  decisions: {
+    updates: CorpusUpdate[];
+    acks: CorpusAck[];
+    plans: CorpusPlan[];
+    states: CorpusState[];
+    inputs: CorpusInput[];
+    echoes: CorpusEcho[];
+  };
+  invariants: {
+    invariant: string;
+    version: number;
+    checks: number;
+    violations: number;
+    holds: boolean;
+  }[];
+  violations: { at_us: number; invariant: string; detail: string }[];
+  measurements: CorpusMeasurements;
+  digest: string;
 };
 
-/** The wrapper the corpus's generator writes around a trace. */
+/** The wrapper the harness writes around a trace. */
 export type CorpusDecision = {
   schema: number;
   scenario: string;
-  story: string;
   tier: string;
-  runner: string;
   digest: string;
   trace: CorpusTrace;
 };
@@ -210,7 +245,6 @@ export type CorpusDecision = {
 export type ConformanceCorpus = {
   /** The corpus directory the documents came from. */
   root: string;
-  profiles: Map<string, CorpusProfile>;
   scenarios: Map<string, CorpusScenario>;
   decisions: Map<string, CorpusDecision>;
 };
@@ -260,7 +294,6 @@ function readJsonDirectory<T>(directory: string, label: string): Map<string, T> 
 export function loadCorpus(root: string = resolveCorpusRoot()): ConformanceCorpus {
   return {
     root,
-    profiles: readJsonDirectory<CorpusProfile>(join(root, "profiles"), "profiles"),
     scenarios: readJsonDirectory<CorpusScenario>(join(root, "scenarios"), "scenarios"),
     decisions: readJsonDirectory<CorpusDecision>(join(root, "decisions"), "decisions"),
   };
@@ -293,15 +326,16 @@ export type PublishedReceiverDecisions = {
  *
  * The progression is the acknowledgement timeline's high-water marks: the
  * receiver's applied window only ever advances, so the marks it reported are
- * the updates it applied that moved the window. The timeline carries two
- * kinds of acknowledgement — the receiver's own reports and the sender's view
- * of them — and the two are interleaved, so the progression is their running
- * maximum.
+ * the updates it applied that moved the window.
+ *
+ * The chain epoch is zero: the corpus's runs are clean, so no session was
+ * ever recreated and the receiver's trust epoch never moved. The browser's
+ * machine must hold the same epoch.
  */
 export function publishedReceiverDecisions(trace: CorpusTrace): PublishedReceiverDecisions {
   const highestApplied: number[] = [];
   let mark = 0;
-  for (const ack of trace.acks) {
+  for (const ack of trace.decisions.acks) {
     mark = Math.max(mark, ack.highest_applied_update_id);
     // A mark of zero is "nothing applied yet", not an update id.
     if (mark === 0) {
@@ -314,10 +348,10 @@ export function publishedReceiverDecisions(trace: CorpusTrace): PublishedReceive
   return {
     highestApplied,
     appliedUpdateIds: [...highestApplied],
-    appliedCount: trace.counters.updates_applied,
-    chainEpoch: trace.counters.epoch,
-    cells: trace.counters.cells,
-    acks: trace.acks,
+    appliedCount: trace.measurements.updates_applied,
+    chainEpoch: 0,
+    cells: trace.measurements.cells,
+    acks: trace.decisions.acks,
   };
 }
 
@@ -337,8 +371,8 @@ export type ReplayResult = {
   appliedCount: number;
 };
 
-/** The carrier a profile's MTU selects (the reference implementation's rule). */
-export function carrierForProfile(profile: CorpusProfile): MediaCarrier {
+/** The carrier a link's MTU selects (the reference implementation's rule). */
+export function carrierForLink(profile: CorpusLinkProfile): MediaCarrier {
   return profile.mtu_bytes <= 1_150 ? "datagram" : "stream";
 }
 
@@ -385,12 +419,12 @@ export function buildScenarioFragments(
   if (!trace) {
     throw new Error(`the corpus has no decision trace for ${scenarioId}`);
   }
-  const profile = scenarioProfile(corpus, scenarioId);
-  const carrier = carrierForProfile(profile);
+  const profile = scenarioLink(corpus, scenarioId);
+  const carrier = carrierForLink(profile);
   const payloadCap = fragmentPayloadCap(carrier);
   const published = publishedReceiverDecisions(trace);
   const emitted = new Map<number, CorpusUpdate>();
-  for (const update of trace.updates) {
+  for (const update of trace.decisions.updates) {
     emitted.set(update.update_id, update);
   }
 
@@ -438,20 +472,17 @@ export function buildScenarioFragments(
   };
 }
 
-/** The link profile a scenario names. */
-function scenarioProfile(corpus: ConformanceCorpus, scenarioId: string): CorpusProfile {
+/** The link a scenario runs on: the last profile it set, or the one it starts on. */
+function scenarioLink(corpus: ConformanceCorpus, scenarioId: string): CorpusLinkProfile {
   const scenario = corpus.scenarios.get(scenarioId);
   if (!scenario) {
     throw new Error(`the corpus has no scenario named ${scenarioId}`);
   }
-  let profile: CorpusProfile | undefined;
+  let profile = scenario.link;
   for (const step of scenario.steps) {
-    if (typeof step === "object" && "Link" in step) {
-      profile = corpus.profiles.get(step.Link.profile);
+    if (typeof step === "object" && "SetLink" in step) {
+      profile = step.SetLink.profile;
     }
-  }
-  if (!profile) {
-    throw new Error(`the scenario ${scenarioId} names no link profile`);
   }
   return profile;
 }
@@ -461,9 +492,8 @@ function scenarioProfile(corpus: ConformanceCorpus, scenarioId: string): CorpusP
  *
  * The machine is driven the way a receiver is driven: the corpus's media
  * objects travel as MLP fragments, they are parsed and assembled, and the
- * application reports what it applied. The scenario's steps drive the clock
- * and the link profile, and the published progression is what the machine's
- * acknowledgements are compared against.
+ * application reports what it applied. The published progression is what the
+ * machine's acknowledgements are compared against.
  */
 export function replayScenario(
   corpus: ConformanceCorpus,
@@ -474,21 +504,21 @@ export function replayScenario(
     throw new Error(`the corpus has no decision trace for ${scenarioId}`);
   }
   const trace = decision.trace;
-  const profile = scenarioProfile(corpus, scenarioId);
+  const profile = scenarioLink(corpus, scenarioId);
   const published = publishedReceiverDecisions(trace);
   const scene = buildScenarioFragments(corpus, scenarioId);
   const emitted = new Map<number, CorpusUpdate>();
-  for (const update of trace.updates) {
+  for (const update of trace.decisions.updates) {
     emitted.set(update.update_id, update);
   }
 
   let clockMs = 0;
   const machine = new MediaReceiverMachine({
     now: () => clockMs,
-    rttMs: () => profile.rtt_ms,
+    rttMs: () => profile.down.propagation_us * 2 / 1_000,
     appliedCellCount: () => published.cells,
   });
-  const assembler = new MediaObjectAssembler(defaultObjectAssemblerConfig(profile.rtt_ms));
+  const assembler = new MediaObjectAssembler(defaultObjectAssemblerConfig(trace.measurements.rtt_ms));
 
   const highestApplied: number[] = [];
   const appliedUpdateIds: number[] = [];
@@ -501,7 +531,7 @@ export function replayScenario(
     if (!update) {
       throw new Error(`the trace of ${scenarioId} publishes an update ${updateId} it never emitted`);
     }
-    clockMs = update.at_ms;
+    clockMs = Math.floor(update.at_us / 1_000);
 
     const decoded = decodeMediaFragment(scene.fragments[index], scene.carrier);
     if (!decoded.ok) {
@@ -570,7 +600,7 @@ export type ParityDifference = {
  * Compare the machine's decisions with the published ones.
  *
  * The comparison is the gate: an empty list means the browser's machine
- * decided the way the corpus's reference runner decided.
+ * decided the way the harness's run decided.
  */
 export function compareReplay(
   published: PublishedReceiverDecisions,

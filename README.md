@@ -62,11 +62,11 @@ applied.
 ## The conformance corpus
 
 The corpus in [`mlp-conformance`](../mlp-conformance) is the protocol's
-shared, executable description of what it promises: the tier profiles, the
-acceptance scenarios, and the golden decision traces the reference runner
-produces. The reference implementation regenerates those traces and the
-corpus's own gate compares the bytes; this package is the browser's half of
-the same gate.
+shared, executable description of what it promises: the acceptance
+scenarios, the matrix that maps the specification's stories onto them, and
+the golden decision traces the verification layer produces. The verification
+layer regenerates those traces and the corpus's own gate compares the bytes;
+this package is the browser's half of the same gate.
 
 `src/conformance.ts` reads the corpus and replays each scenario through this
 package's receiver machine: the corpus's media objects travel as MLP
