@@ -1,7 +1,7 @@
 {
   "name": "@medialaneprotocol/mlp",
   "version": "0.1.0",
-  "description": "TypeScript reference implementation of the Media Lane Protocol: fragment codec, object assembler, lane client, resume, and path selection.",
+  "description": "TypeScript reference implementation of the Media Lane Protocol: fragment codec, object assembler, lane client, receiver machine, resume, and path selection.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "main": "./src/index.ts",
@@ -13,7 +13,7 @@
     "./resume": "./src/media-resume.ts",
     "./path": "./src/media-path.ts",
     "./constants": "./src/protocol-constants.ts",
-    "./screen": "./src/screen-stream.ts"
+    "./receiver": "./src/receiver.ts"
   },
   "files": [
     "src",
@@ -28,15 +28,15 @@
     "generate:check": "npm --prefix ../mlp-proto run generate:check"
   },
   "dependencies": {
-    "@medialaneprotocol/proto": "file:../mlp-proto",
-    "@tessellio/ts": "file:../../tessellio/tessellio-ts"
+    "@medialaneprotocol/proto": "file:../mlp-proto"
   },
   "devDependencies": {
     "@bufbuild/protobuf": "^2.16.0",
+    "@eslint/js": "^9.39.0",
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
     "typescript": "^5.6.0",
-    "vitest": "^5.0.3",
-    "jsdom": "^25.0.0"
+    "typescript-eslint": "^8.72.0",
+    "vitest": "^5.0.3"
   }
 }

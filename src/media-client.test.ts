@@ -216,7 +216,10 @@ describe("the media-lane client (MLP spec §6.3, §§7.2)", () => {
 
     const hello = transport.sent.find((bytes) => bytes[5] === MediaFragmentClass.CONTROL);
     expect(hello, "the hello fragment was sent").toBeDefined();
-    expect(hello![6] & MediaFragmentFlags.FIN, "FIN is set").toBe(MediaFragmentFlags.FIN);
+    if (!hello) {
+      throw new Error("the hello fragment was not sent");
+    }
+    expect(hello[6] & MediaFragmentFlags.FIN, "FIN is set").toBe(MediaFragmentFlags.FIN);
     client.stop();
   });
 
