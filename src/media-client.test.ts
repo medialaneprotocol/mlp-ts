@@ -9,6 +9,7 @@ import {
   MediaHelloAck,
   MediaPathChange,
   MediaProbe,
+  ProbeEcho,
 } from "@medialaneprotocol/proto";
 import {
   ControlLaneMediaTransport,
@@ -18,9 +19,11 @@ import {
 import {
   MediaFragmentClass,
   MediaFragmentFlags,
+  type MediaFragment,
   MediaTlv,
   decodeMediaFragment,
   encodeMediaFragment,
+  readTlvU32,
   readTlvU64,
   tlvU64,
 } from "./media-pdu";
@@ -71,6 +74,13 @@ class FakeTransport implements MediaLaneTransport {
       .map((fragment) => MediaControlObject.decode(fragment.payload));
   }
 
+  /**
+   * The reports the client sent.
+   *
+   * A report is a FEEDBACK object at priority 2 that is **not** an echo: the
+   * echo names the object it answers in `ECHO_OF_OBJECT_ID`, and the header —
+   * not the body — is what says which is which (MLP spec §4.3, §5.2).
+   */
   feedbackObjects(): MediaFeedback[] {
     return this.sent
       .map((bytes) => decodeMediaFragment(bytes, "stream"))
@@ -79,6 +89,7 @@ class FakeTransport implements MediaLaneTransport {
       .filter((fragment): fragment is NonNullable<typeof fragment> => fragment !== null)
       .filter((fragment) => fragment.classValue === MediaFragmentClass.FEEDBACK)
       .filter((fragment) => fragment.priority === 2)
+      .filter((fragment) => readTlvU32(fragment, MediaTlv.ECHO_OF_OBJECT_ID) === null)
       .map((fragment) => MediaFeedback.decode(fragment.payload));
   }
 
@@ -91,6 +102,21 @@ class FakeTransport implements MediaLaneTransport {
       .filter((fragment): fragment is NonNullable<typeof fragment> => fragment !== null)
       .filter((fragment) => fragment.priority === 0)
       .map((fragment) => MediaAck.decode(fragment.payload));
+  }
+
+  /**
+   * The echo objects the client sent: a FEEDBACK object that names the object
+   * it answers in `ECHO_OF_OBJECT_ID` (MLP spec §4.3, §5.2).
+   */
+  echoObjects(): { fragment: MediaFragment; echo: ProbeEcho }[] {
+    return this.sent
+      .map((bytes) => decodeMediaFragment(bytes, "stream"))
+      .filter((verdict) => verdict.ok)
+      .map((verdict) => (verdict.ok ? verdict.fragment : null))
+      .filter((fragment): fragment is NonNullable<typeof fragment> => fragment !== null)
+      .filter((fragment) => fragment.classValue === MediaFragmentClass.FEEDBACK)
+      .filter((fragment) => readTlvU32(fragment, MediaTlv.ECHO_OF_OBJECT_ID) !== null)
+      .map((fragment) => ({ fragment, echo: ProbeEcho.decode(fragment.payload) }));
   }
 }
 
@@ -369,7 +395,71 @@ describe("the media-lane client (MLP spec §6.3, §§7.2)", () => {
     expect(test.client.stats.lostObjects).toBe(1);
   });
 
-  it("answers a sender probe with an echo in the next report", async () => {
+  it("answers a probe with an echo the prober correlates by object id", async () => {
+    const test = harness();
+    void test.client.attachDual();
+    await flush();
+    test.sessionMs.value = 250;
+    const probe = encodeMediaFragment({
+      classValue: MediaFragmentClass.FEEDBACK,
+      flags: MediaFragmentFlags.FIN | MediaFragmentFlags.PROBE | MediaFragmentFlags.ECHO_REQUESTED,
+      priority: 2,
+      objectId: 77,
+      fragmentIndex: 0,
+      fragmentCount: 1,
+      headerExt: [tlvU64(MediaTlv.SEND_EPOCH_MS, 100)],
+      payload: MediaProbe.encode({ probeId: 77, payloadBytes: 0, sendEpochMs: 100 }).finish(),
+    });
+    test.transport.sent.length = 0;
+    test.client.handleFragment(probe);
+
+    // The echo is an object of its own: the prober is waiting for it, and a
+    // report rides the reporting cadence.
+    const echoes = test.transport.echoObjects();
+    expect(echoes).toHaveLength(1);
+    expect(
+      readTlvU32(echoes[0].fragment, MediaTlv.ECHO_OF_OBJECT_ID),
+      "the echo names the object id of the probe it answers",
+    ).toBe(77);
+    expect(
+      readTlvU64(echoes[0].fragment, MediaTlv.SEND_EPOCH_MS),
+      "the prober's epoch is quoted verbatim",
+    ).toBe(100);
+    expect(echoes[0].echo.objectId).toBe(77);
+    expect(echoes[0].echo.sendEpochMs).toBe(100);
+    expect(echoes[0].echo.echoEpochMs).toBe(250);
+  });
+
+  it("answers a probe whose body names another id by the object's own id", async () => {
+    const test = harness();
+    void test.client.attachDual();
+    await flush();
+    test.sessionMs.value = 250;
+    // A hop's probe: the body's `probe_id` is the hop's own counter, and it is
+    // not the identity the prober correlates by.
+    const probe = encodeMediaFragment({
+      classValue: MediaFragmentClass.FEEDBACK,
+      flags: MediaFragmentFlags.FIN | MediaFragmentFlags.PROBE | MediaFragmentFlags.ECHO_REQUESTED,
+      priority: 2,
+      objectId: 0x8000_0007,
+      fragmentIndex: 0,
+      fragmentCount: 1,
+      headerExt: [],
+      payload: MediaProbe.encode({ probeId: 3, payloadBytes: 0, sendEpochMs: 0 }).finish(),
+    });
+    test.transport.sent.length = 0;
+    test.client.handleFragment(probe);
+
+    const echoes = test.transport.echoObjects();
+    expect(echoes).toHaveLength(1);
+    expect(
+      readTlvU32(echoes[0].fragment, MediaTlv.ECHO_OF_OBJECT_ID),
+      "the correlation is the object id, never the body's probe id",
+    ).toBe(0x8000_0007);
+    expect(echoes[0].echo.objectId).toBe(0x8000_0007);
+  });
+
+  it("carries no probe echo in the report: the echo is one identity", async () => {
     const test = harness();
     void test.client.attachDual();
     await flush();
@@ -388,11 +478,10 @@ describe("the media-lane client (MLP spec §6.3, §§7.2)", () => {
     test.client.handleFragment(probe);
     test.client.sendFeedbackNow();
 
-    const report = test.transport.feedbackObjects()[0];
-    expect(report.probes).toHaveLength(1);
-    expect(report.probes[0].objectId).toBe(77);
-    expect(report.probes[0].sendEpochMs).toBe(100);
-    expect(report.probes[0].echoEpochMs).toBe(250);
+    const reports = test.transport.feedbackObjects();
+    expect(reports.length).toBeGreaterThan(0);
+    const report = reports[reports.length - 1];
+    expect(report.probes).toHaveLength(0);
   });
 
   it("reports the receiver's counters, the ack grid and the cadence window", async () => {

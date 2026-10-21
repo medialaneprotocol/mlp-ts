@@ -33,7 +33,7 @@ import {
   MediaHello,
   MediaHelloAck,
   MediaPathChange,
-  MediaProbe,
+  ProbeEcho,
   type MediaResume,
 } from "@medialaneprotocol/proto";
 import {
@@ -60,6 +60,7 @@ import {
   type MediaObject,
   MediaObjectAssembler,
   type MediaRejectReason,
+  type MediaTlvEntry,
   MediaTlv,
   decodeMediaMessage,
   defaultObjectAssemblerConfig,
@@ -68,6 +69,8 @@ import {
   mediaRejectCode,
   readTlvU32,
   readTlvU64,
+  tlvU32,
+  tlvU64,
 } from "./media-pdu";
 import {
   type MediaCloseDisposition,
@@ -371,12 +374,6 @@ export class MediaLaneClient {
   private readonly ladder: ReconnectLadder;
   private readonly now: () => number;
   private readonly random: () => number;
-  private readonly pendingProbes: Array<{
-    objectId: number;
-    sendEpochMs: number;
-    echoEpochMs: number;
-    payloadBytes: number;
-  }> = [];
   private readonly reportedErrors = new Map<number, number>();
   private readonly seenObjectIds = new Map<number, number>();
   private readonly seenOrder: number[] = [];
@@ -652,17 +649,36 @@ export class MediaLaneClient {
     );
   }
 
-  /** Queue a `MediaProbe` echo; it rides the next report (§§6.2). */
+  /**
+   * Answer a probe with the echo the prober correlates.
+   *
+   * The echo names the **object id** of the object it answers, in the
+   * `ECHO_OF_OBJECT_ID` TLV, and quotes the prober's epoch verbatim in
+   * `SEND_EPOCH_MS` (MLP spec §4.3, §5.2). The correlation is the object id:
+   * a probe's own `probe_id` is a body field, and a body field is not an
+   * identity — a hop that never decodes a body (this protocol's relays do
+   * exactly that) can only measure its own round trip from the TLV.
+   *
+   * The echo is an object of its own, not a field of the next report: the
+   * prober is waiting for it, and a report rides the reporting cadence.
+   */
   echoProbe(objectId: number, sendEpochMs: number, payloadBytes: number): void {
-    this.pendingProbes.push({
+    const echo = ProbeEcho.encode({
       objectId,
       sendEpochMs,
       echoEpochMs: this.options.sessionMs(),
       payloadBytes,
-    });
-    if (this.pendingProbes.length >= 8) {
-      this.sendFeedbackNow();
-    }
+    }).finish();
+    this.sendObject(
+      MediaFragmentClass.FEEDBACK,
+      MediaFragmentFlags.NONE,
+      echo,
+      defaultPriorityFor(MediaFragmentClass.FEEDBACK),
+      [
+        tlvU32(MediaTlv.ECHO_OF_OBJECT_ID, objectId),
+        tlvU64(MediaTlv.SEND_EPOCH_MS, sendEpochMs),
+      ],
+    );
   }
 
   /** Send a typed lane error (rate-limited per code, §§6.3). */
@@ -700,7 +716,10 @@ export class MediaLaneClient {
       reorderedObjects: this.windowReordered,
       windowMs,
       ack: wireAck(source.ack),
-      probes: this.pendingProbes.splice(0, this.pendingProbes.length),
+      // The echo of a probe is an object of its own (see `echoProbe`): the
+      // report carries no probe echo, so there is no second spelling of the
+      // correlation.
+      probes: [],
       bufferedAmountBytes: Math.round(this.transport.bufferedAmount()),
       displayFps: Math.round(source.fps),
       renderMsP50: Math.round(source.renderMsP50),
@@ -1088,6 +1107,7 @@ export class MediaLaneClient {
     flags: number,
     payload: Uint8Array,
     priority = defaultPriorityFor(classValue),
+    headerExt: MediaTlvEntry[] = [],
   ): void {
     const transport = this.transport;
     if (!transport?.isOpen) {
@@ -1110,7 +1130,7 @@ export class MediaLaneClient {
       objectId: this.outboundObjectId,
       fragmentIndex: 0,
       fragmentCount: 1,
-      headerExt: [],
+      headerExt,
       payload,
     });
     transport.sendFragment(bytes);
@@ -1226,15 +1246,16 @@ export class MediaLaneClient {
       // a hop echoes one back): nothing to do with it.
       return;
     }
-    const sendEpochMs = readTlvU64(object, MediaTlv.SEND_EPOCH_MS) ?? 0;
-    try {
-      const probe = MediaProbe.decode(object.payload);
-      if ((object.flags & MediaFragmentFlags.ECHO_REQUESTED) !== 0) {
-        this.echoProbe(probe.probeId || object.objectId, probe.sendEpochMs || sendEpochMs, object.payload.byteLength);
-      }
-    } catch {
-      this.countReject("BODY_INVALID", object.objectId);
+    if ((object.flags & MediaFragmentFlags.ECHO_REQUESTED) === 0) {
+      return;
     }
+    // The peer asked for an echo and is waiting for it (MLP spec §4.3): the
+    // echo is owed whatever the body holds, and it names the **object id** of
+    // the object it answers — the probe's own `probe_id` is a body field, and
+    // a body field is not an identity. The prober's epoch is quoted verbatim
+    // so the round trip is a subtraction on the prober's own clock.
+    const sendEpochMs = readTlvU64(object, MediaTlv.SEND_EPOCH_MS) ?? 0;
+    this.echoProbe(object.objectId, sendEpochMs, object.payload.byteLength);
   }
 
   private decodeControl(object: MediaObject): void {
