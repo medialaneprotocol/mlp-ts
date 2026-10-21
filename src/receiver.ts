@@ -17,10 +17,31 @@
  * be understood by the transport can still be moved by it.
  */
 
-import { ACK_WINDOW_BITS, MediaAckWindow } from "./media-pdu";
+import { ACK_WINDOW_BITS, MediaAckWindow, MediaTlv, type MediaObject, readTlvU64 } from "./media-pdu";
 import { FifoSet } from "./fifo-set";
 import { emptyResumeSnapshot, type MediaResumeSnapshot } from "./media-resume";
 import { DEFAULT_RTT_MS, waitingUpdateTimeoutMs } from "./protocol-constants";
+
+/**
+ * The protocol's update id of a media object (MLP spec §5.1.1).
+ *
+ * The update id is the protocol's identity of a media update, and it is the
+ * identity an acknowledgement credits: the applied-update window, the
+ * `highest_applied_update_id` and the reported loss are all in the
+ * update-id space. A codec's body may carry its own id, and it must mirror
+ * this one (§4.3's `META_MISMATCH`); an application that drives the receiver
+ * machine uses this id.
+ *
+ * It is `null` for an object that carries no update id — an intermediary's
+ * own object, or a body that is not a media update.
+ */
+export function protocolUpdateId(object: MediaObject): number | null {
+  const updateId = readTlvU64(object, MediaTlv.UPDATE_ID);
+  if (updateId === null || updateId < 1) {
+    return null;
+  }
+  return updateId;
+}
 
 /**
  * The transport's own metadata about one media object (MLP spec §4.3).

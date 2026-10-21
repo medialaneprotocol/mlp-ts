@@ -314,17 +314,59 @@ describe("the media-lane client (MLP spec §6.3, §§7.2)", () => {
     expect(test.client.stats.receivedBytes).toBe(3);
   });
 
-  it("counts object-id gaps as loss and repeats as duplicates", async () => {
+  it("counts update-id gaps as loss and object-id repeats as duplicates", async () => {
     const test = harness();
     void test.client.attachDual();
     await flush();
     test.client.handleFragment(mediaObject({ objectId: 1, updateId: 10 }));
-    test.client.handleFragment(mediaObject({ objectId: 5, updateId: 11 }));
-    test.client.handleFragment(mediaObject({ objectId: 5, updateId: 11 }));
+    test.client.handleFragment(mediaObject({ objectId: 5, updateId: 13 }));
+    test.client.handleFragment(mediaObject({ objectId: 5, updateId: 13 }));
 
-    expect(test.client.stats.lostObjects).toBe(3);
+    // The loss accounting is in the update-id space (MLP spec §5.2): the gap
+    // between update 10 and update 13 is two media updates the receiver never
+    // saw. The object-id gap between 1 and 5 means nothing: the object-id
+    // space is per sender (§4.2).
+    expect(test.client.stats.lostObjects).toBe(2);
     expect(test.client.stats.duplicatedObjects).toBe(1);
     expect(test.client.stats.reorderedObjects).toBe(0);
+  });
+
+  it("does not read an intermediary's own object id as loss", async () => {
+    // The hop report an intermediary sends carries an object id from *its own*
+    // counter (the reserved high range). Read as a gap in the media sender's
+    // object-id sequence it is billions of lost objects, and the sender's
+    // estimator then pins itself at its floor on a clean link.
+    const test = harness();
+    void test.client.attachDual();
+    await flush();
+    test.client.handleFragment(mediaObject({ objectId: 1, updateId: 10 }));
+    test.client.handleFragment(mediaObject({ objectId: 2, updateId: 11 }));
+    test.client.handleFragment(encodeMediaFragment({
+      classValue: MediaFragmentClass.FEEDBACK,
+      flags: MediaFragmentFlags.FIN,
+      priority: 2,
+      objectId: 0x8000_0000,
+      fragmentIndex: 0,
+      fragmentCount: 1,
+      headerExt: [],
+      payload: MediaProbe.encode({ probeId: 1, payloadBytes: 0, sendEpochMs: 0 }).finish(),
+    }));
+
+    expect(test.client.stats.lostObjects).toBe(0);
+    expect(test.client.stats.reorderedObjects).toBe(0);
+    expect(test.client.stats.receivedObjects).toBe(3);
+  });
+
+  it("counts a media update that arrives out of order as reordered", async () => {
+    const test = harness();
+    void test.client.attachDual();
+    await flush();
+    test.client.handleFragment(mediaObject({ objectId: 1, updateId: 10 }));
+    test.client.handleFragment(mediaObject({ objectId: 2, updateId: 12 }));
+    test.client.handleFragment(mediaObject({ objectId: 3, updateId: 11 }));
+
+    expect(test.client.stats.reorderedObjects).toBe(1);
+    expect(test.client.stats.lostObjects).toBe(1);
   });
 
   it("answers a sender probe with an echo in the next report", async () => {

@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  MediaFragmentClass,
+  MediaFragmentFlags,
+  MediaTlv,
+  type MediaObject,
+} from "./media-pdu";
+import {
   MediaReceiverMachine,
   isAckApplied,
+  protocolUpdateId,
   validateAck,
   type MediaObjectMeta,
   type MediaReceiverOptions,
@@ -474,5 +481,22 @@ describe("the opaque body", () => {
     expect(machine.staleCellCount).toBe(16);
     expect(machine.appliedUpdateId).toBe(0);
     expect(machine.ack.ackBitmap).toBe(0n);
+  });
+});
+
+describe("the protocol's update id (MLP spec §5.1.1)", () => {
+  it("is the update id the acknowledgement credits, and it is null without one", () => {
+    const media: MediaObject = {
+      objectId: 7,
+      classValue: MediaFragmentClass.MEDIA,
+      flags: MediaFragmentFlags.FIN,
+      priority: 6,
+      headerExt: [{ type: MediaTlv.UPDATE_ID, value: new Uint8Array([10, 0, 0, 0, 0, 0, 0, 0]) }],
+      payload: new Uint8Array(0),
+      receivedAtMs: 0,
+    };
+    expect(protocolUpdateId(media)).toBe(10);
+    // An intermediary's own object carries no update id.
+    expect(protocolUpdateId({ ...media, headerExt: [] })).toBeNull();
   });
 });

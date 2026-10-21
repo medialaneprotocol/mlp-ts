@@ -380,6 +380,16 @@ export class MediaLaneClient {
   private readonly reportedErrors = new Map<number, number>();
   private readonly seenObjectIds = new Map<number, number>();
   private readonly seenOrder: number[] = [];
+  /**
+   * The media updates the receiver has seen, by **update id** (MLP spec §5.2).
+   *
+   * The update id is the protocol's identity of a media update, and it is the
+   * space the loss accounting is made in: the object id identifies an object
+   * for deduplication and its space is per sender (§4.2), so a gap in it
+   * means nothing.
+   */
+  private readonly seenUpdateIds = new Set<number>();
+  private readonly seenUpdateOrder: number[] = [];
   private mode: "idle" | "dual" | "single" = "idle";
   private transport: MediaLaneTransport | null = null;
   /**
@@ -404,7 +414,7 @@ export class MediaLaneClient {
   private windowLost = 0;
   private windowDuplicated = 0;
   private windowReordered = 0;
-  private highestSeenObjectId = 0;
+  private highestSeenUpdateId = 0;
   private rttMs = DEFAULT_RTT_MS;
   private rttMinMs = Number.POSITIVE_INFINITY;
   private jitterMs = 0;
@@ -1115,6 +1125,13 @@ export class MediaLaneClient {
 
     switch (object.classValue) {
       case MediaFragmentClass.MEDIA:
+        // The loss accounting lives in the **update-id** space, not in the
+        // object-id space (MLP spec §5.2): the object id identifies an object
+        // for deduplication (§4.4) and its space is *per sender* (§4.2), so a
+        // gap in it says nothing about loss — an intermediary's own object
+        // (a hop report, a lane error) carries an id from its own counter and
+        // would read as billions of lost objects.
+        this.noteMediaUpdateId(object);
         this.options.onObject?.(object);
         break;
       case MediaFragmentClass.CURSOR:
@@ -1142,22 +1159,55 @@ export class MediaLaneClient {
       return;
     }
 
-    if (id > this.highestSeenObjectId + 1) {
-      const gap = id - this.highestSeenObjectId - 1;
-      this.counters.lostObjects += gap;
-      this.windowLost += gap;
-    } else if (id <= this.highestSeenObjectId) {
-      this.counters.reorderedObjects += 1;
-      this.windowReordered += 1;
-    }
-
-    this.highestSeenObjectId = Math.max(this.highestSeenObjectId, id);
     this.seenObjectIds.set(id, this.now());
     this.seenOrder.push(id);
     while (this.seenOrder.length > DEDUPE_WINDOW_OBJECTS) {
       const dropped = this.seenOrder.shift();
       if (dropped !== undefined) {
         this.seenObjectIds.delete(dropped);
+      }
+    }
+  }
+
+  /**
+   * Account one media object in the **update-id** space (MLP spec §5.2).
+   *
+   * The update id is the protocol's own identity of a media update: it is
+   * monotone per receiver, so a gap in it is a media update the receiver never
+   * saw. The object id cannot carry that meaning — its space is per sender
+   * (§4.2), and a lane carries objects from several senders.
+   *
+   * An object with no update id is not a media update the protocol accounts
+   * for (an echo, a duplicated object): it is counted as neither lost nor
+   * reordered.
+   */
+  private noteMediaUpdateId(object: MediaObject): void {
+    const updateId = readTlvU64(object, MediaTlv.UPDATE_ID);
+    if (updateId === null || updateId < 1) {
+      return;
+    }
+    if (this.seenUpdateIds.has(updateId)) {
+      // A re-delivery of an update the receiver already holds is a duplicate,
+      // and the object-id dedupe has already counted it.
+      return;
+    }
+    if (this.highestSeenUpdateId > 0) {
+      if (updateId > this.highestSeenUpdateId + 1) {
+        const gap = updateId - this.highestSeenUpdateId - 1;
+        this.counters.lostObjects += gap;
+        this.windowLost += gap;
+      } else if (updateId <= this.highestSeenUpdateId) {
+        this.counters.reorderedObjects += 1;
+        this.windowReordered += 1;
+      }
+    }
+    this.highestSeenUpdateId = Math.max(this.highestSeenUpdateId, updateId);
+    this.seenUpdateIds.add(updateId);
+    this.seenUpdateOrder.push(updateId);
+    while (this.seenUpdateOrder.length > DEDUPE_WINDOW_OBJECTS) {
+      const dropped = this.seenUpdateOrder.shift();
+      if (dropped !== undefined) {
+        this.seenUpdateIds.delete(dropped);
       }
     }
   }
