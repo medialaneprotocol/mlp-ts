@@ -32,10 +32,12 @@ import { describe, expect, it } from "vitest";
 import {
   buildScenarioFragments,
   loadCorpus,
+  publishedReceiverDecisions,
   resolveCorpusRoot,
   type ScenarioFragments,
 } from "./conformance";
 import {
+  DEDUP_WINDOW,
   MediaObjectAssembler,
   decodeMediaFragment,
   defaultObjectAssemblerConfig,
@@ -45,8 +47,35 @@ import { MediaReceiverMachine } from "./receiver";
 const corpus = loadCorpus();
 const scenarioIds = [...corpus.scenarios.keys()].sort();
 
-/** How many times every scenario is replayed: enough to fill both windows. */
-const PASSES = 16;
+/**
+ * How many updates one pass over the corpus replays.
+ *
+ * The corpus publishes the receiver's own decisions, and the marks it
+ * published are the updates the receiver applied: one fragment each. The
+ * count is at least one, so a corpus that publishes no update at all still
+ * replays a session instead of counting for ever.
+ */
+const publishedUpdates = Math.max(
+  1,
+  scenarioIds.reduce((count, id) => {
+    const decision = corpus.decisions.get(id);
+    if (!decision) {
+      throw new Error(`the corpus has no decision trace for ${id}`);
+    }
+    return count + publishedReceiverDecisions(decision.trace).appliedUpdateIds.length;
+  }, 0),
+);
+
+/**
+ * How many times every scenario is replayed: enough to fill both windows.
+ *
+ * The assembler's dedupe window is `DEDUP_WINDOW` pairs deep and the
+ * receiver's applied-part record is narrower, so the dedupe window is the
+ * one that has to fill. The count of passes follows the corpus, because the
+ * corpus is what the session replays: a corpus that publishes fewer updates
+ * is replayed more often, and the window fills either way.
+ */
+const PASSES = Math.ceil(DEDUP_WINDOW / publishedUpdates);
 
 type Scene = {
   fragments: Uint8Array[];
@@ -151,7 +180,9 @@ describe("the receiver's per-update budget", () => {
     run(true, scenes);
 
     expect(machine.stats.appliedUpdates).toBeGreaterThan(warmUpdates);
-    expect(totalSamples.length).toBeGreaterThan(4_000);
+    // The measurement is of the steady state: the dedupe window is full, so
+    // every fragment pays the eviction a long session pays.
+    expect(totalSamples.length).toBeGreaterThanOrEqual(DEDUP_WINDOW);
 
     // The clock is in milliseconds; the budgets are in microseconds.
     const assembly = median(assemblySamples) * 1_000;
