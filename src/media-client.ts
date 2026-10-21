@@ -51,6 +51,7 @@ import {
   clampNumber,
   laneProbeTimeoutMs,
   reportIntervalMs,
+  promptIntervalMs,
   type MediaPathName,
 } from "./protocol-constants";
 import {
@@ -411,6 +412,11 @@ export class MediaLaneClient {
   private windowLost = 0;
   private windowDuplicated = 0;
   private windowReordered = 0;
+  /** The facts the last report carried: the echo it named and the loss it counted. */
+  private reportedEcho = 0;
+  private reportedLost = 0;
+  /** The last report of any kind, for the prompt's own rate limit. */
+  private lastPromptAtMs = 0;
   private highestSeenUpdateId = 0;
   private rttMs = DEFAULT_RTT_MS;
   private rttMinMs = Number.POSITIVE_INFINITY;
@@ -647,6 +653,10 @@ export class MediaLaneClient {
       MediaAck.encode(wireAck(ack)).finish(),
       0,
     );
+    // The acknowledgement names the input the applied content reflects: a
+    // new echo is a fact the sender cannot wait for, so the report that names
+    // it goes out at once (MLP spec §6.2.1).
+    this.notePromptFact();
   }
 
   /**
@@ -696,14 +706,30 @@ export class MediaLaneClient {
 
   /** Build and send one `MediaFeedback` report (§§7.2.1). */
   sendFeedbackNow(): void {
+    this.sendReport(true);
+  }
+
+  /**
+   * Build and send one `MediaFeedback` report (§§7.2.1).
+   *
+   * The report that **closes** the measurement window carries the window's
+   * counters and the window's length, and starts the next window. The
+   * **prompt** report — the one a fact the sender cannot wait for brings
+   * forward — carries the open window's counters and no window at all:
+   * `windowMs = 0` says "the measurement window is still open", and a sender
+   * reads that as an acknowledgement and a sign of life rather than as a
+   * measurement (MLP spec §6.2.1).
+   */
+  private sendReport(closesWindow: boolean): void {
     if (!this.transport?.isOpen) {
       return;
     }
 
     const sessionMs = this.options.sessionMs();
-    const windowMs = Math.max(1, sessionMs - this.windowStartedAtMs);
+    const windowMs = closesWindow ? Math.max(1, sessionMs - this.windowStartedAtMs) : 0;
     const source = this.options.feedbackSource();
-    const goodputBps = Math.round((this.windowBytes * 8_000) / windowMs);
+    const goodputBps =
+      windowMs > 0 ? Math.round((this.windowBytes * 8_000) / windowMs) : this.lastGoodputBps;
 
     const feedback: MediaFeedback = {
       rttMs: Math.round(clampNumber(this.rttMs, 1, 60_000)),
@@ -733,14 +759,42 @@ export class MediaLaneClient {
     };
 
     this.lastGoodputBps = goodputBps;
-    this.windowBytes = 0;
-    this.windowObjects = 0;
-    this.windowLost = 0;
-    this.windowDuplicated = 0;
-    this.windowReordered = 0;
-    this.windowStartedAtMs = sessionMs;
+    this.reportedEcho = source.ack.echoOfInputSeq;
+    this.reportedLost = this.windowLost;
+    this.lastPromptAtMs = sessionMs;
+    if (closesWindow) {
+      this.windowBytes = 0;
+      this.windowObjects = 0;
+      this.windowLost = 0;
+      this.windowDuplicated = 0;
+      this.windowReordered = 0;
+      this.windowStartedAtMs = sessionMs;
+    }
 
     this.sendFeedbackObject(MediaFeedback.encode(feedback).finish());
+  }
+
+  /**
+   * The prompt: a report goes out at once when the receiver holds a fact the
+   * sender cannot wait for — an input echo the sender has not been told
+   * about, or a loss attribution (MLP spec §6.2.1).
+   *
+   * The rate is bounded by the prompt interval, so a burst of input is a
+   * burst of echoes but not a burst of reports.
+   */
+  private notePromptFact(): void {
+    if (!this.transport?.isOpen) {
+      return;
+    }
+    const echo = this.ackHint?.echoOfInputSeq ?? 0;
+    if (echo === this.reportedEcho && this.windowLost <= this.reportedLost) {
+      return;
+    }
+    const now = this.options.sessionMs();
+    if (now - this.lastPromptAtMs < promptIntervalMs(this.rttMs)) {
+      return;
+    }
+    this.sendReport(false);
   }
 
   /** Tear the lane down deliberately (the operator closed the session). */
@@ -1216,6 +1270,9 @@ export class MediaLaneClient {
         const gap = updateId - this.highestSeenUpdateId - 1;
         this.counters.lostObjects += gap;
         this.windowLost += gap;
+        // A loss attribution is a fact the sender cannot wait for: the
+        // report that names it goes out at once (MLP spec §6.2.1).
+        this.notePromptFact();
       } else if (updateId <= this.highestSeenUpdateId) {
         this.counters.reorderedObjects += 1;
         this.windowReordered += 1;

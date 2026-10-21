@@ -224,6 +224,18 @@ export function reportIntervalMs(rttMs: number): number {
   return clampNumber(4 * rttMs, 250, 2_000);
 }
 
+/**
+ * `clamp(RTT / 4, 25 ms, 250 ms)` — the shortest wait between two prompt
+ * reports (MLP spec §6.2.1).
+ *
+ * The report cadence is the **idle** cadence; a report goes out at once when
+ * it carries an input echo or a loss attribution, and this is the rate that
+ * bounds how often such a report may go out.
+ */
+export function promptIntervalMs(rttMs: number): number {
+  return clampNumber(rttMs / 4, 25, 250);
+}
+
 /** `clamp(2 × RTT, 5 s, 30 s)` — the pressed-set heartbeat. */
 export function inputPressedHeartbeatMs(rttMs: number): number {
   return clampNumber(2 * rttMs, 5_000, 30_000);

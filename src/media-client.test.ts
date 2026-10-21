@@ -522,6 +522,89 @@ describe("the media-lane client (MLP spec §6.3, §§7.2)", () => {
     expect(test.client.stats.goodputBps).toBe(4_000);
   });
 
+  it("a new echo makes the report go out at once, with the window still open", async () => {
+    const test = harness();
+    void test.client.attachDual();
+    await flush();
+    test.sessionMs.value = 1_000;
+    test.client.handleFragment(mediaObject({ objectId: 1, updateId: 10, payload: new Uint8Array(500) }));
+    // The acknowledgement names an input the sender has not been told about:
+    // the report that names it goes out at once, and the measurement window
+    // is still open (MLP spec §6.2.1).
+    test.client.sendAck({
+      highestAppliedUpdateId: 10,
+      ackBitmap: 1n,
+      chainEpoch: 3,
+      appliedCellCount: 64,
+      staleCells: 0,
+      converged: true,
+      renderLatencyMs: 7,
+      hasRenderLatencyMs: true,
+      echoOfInputSeq: 44,
+      ackEpochMs: 1_000,
+    });
+    const prompt = test.transport.feedbackObjects()[0];
+    expect(prompt).toBeDefined();
+    expect(prompt.windowMs).toBe(0);
+    // The open window's counters are in it, and the window was not reset.
+    expect(prompt.receivedBytes).toBe(500);
+    // The report that closes the window carries the window's length.
+    test.sessionMs.value = 2_000;
+    test.client.sendFeedbackNow();
+    const closed = test.transport.feedbackObjects()[1];
+    expect(closed.windowMs).toBe(2_000);
+  });
+
+  it("the prompt's rate is bounded, so a burst of echoes is not a burst of reports", async () => {
+    const test = harness();
+    void test.client.attachDual();
+    await flush();
+    test.sessionMs.value = 1_000;
+    test.client.sendAck({
+      highestAppliedUpdateId: 10,
+      ackBitmap: 1n,
+      chainEpoch: 3,
+      appliedCellCount: 64,
+      staleCells: 0,
+      converged: true,
+      renderLatencyMs: 7,
+      hasRenderLatencyMs: true,
+      echoOfInputSeq: 44,
+      ackEpochMs: 1_000,
+    });
+    expect(test.transport.feedbackObjects()).toHaveLength(1);
+    // A second echo inside the prompt interval waits for it.
+    test.sessionMs.value = 1_010;
+    test.client.sendAck({
+      highestAppliedUpdateId: 11,
+      ackBitmap: 3n,
+      chainEpoch: 3,
+      appliedCellCount: 64,
+      staleCells: 0,
+      converged: true,
+      renderLatencyMs: 7,
+      hasRenderLatencyMs: true,
+      echoOfInputSeq: 45,
+      ackEpochMs: 1_010,
+    });
+    expect(test.transport.feedbackObjects()).toHaveLength(1);
+    // Past the interval it goes out.
+    test.sessionMs.value = 1_100;
+    test.client.sendAck({
+      highestAppliedUpdateId: 12,
+      ackBitmap: 5n,
+      chainEpoch: 3,
+      appliedCellCount: 64,
+      staleCells: 0,
+      converged: true,
+      renderLatencyMs: 7,
+      hasRenderLatencyMs: true,
+      echoOfInputSeq: 46,
+      ackEpochMs: 1_100,
+    });
+    expect(test.transport.feedbackObjects()).toHaveLength(2);
+  });
+
   it("carries the active carrier path in the report (the §7.8 `path` seam)", async () => {
     /** A selector pinned to one carrier: the S2 seam W10 will drive for real. */
     class PinnedPathSelector extends MediaPathSelector {
