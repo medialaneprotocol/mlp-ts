@@ -340,6 +340,29 @@ describe("the media-lane client (MLP spec §6.3, §§7.2)", () => {
     expect(test.client.stats.receivedBytes).toBe(3);
   });
 
+  it("measures its own loss over the open window, and null when the window is empty", async () => {
+    const test = harness();
+    void test.client.attachDual();
+    await flush();
+
+    // A window with nothing in it carries no loss signal: the ratio is
+    // `null`, never zero (MLP spec §6.2.4 - a receiver that reports only
+    // bytes has not measured a loss).
+    expect(test.client.stats.windowLossRatio).toBeNull();
+
+    // One update of the five that should have arrived did not: the window's
+    // ratio is the receiver's own measurement of the lane's quality, and it
+    // is the same number the sender reads from the feedback the receiver
+    // sends (MLP spec §6.2.2, §6.7.1).
+    test.client.handleFragment(mediaObject({ objectId: 1, updateId: 10 }));
+    test.client.handleFragment(mediaObject({ objectId: 2, updateId: 12 }));
+    test.client.handleFragment(mediaObject({ objectId: 3, updateId: 13 }));
+    test.client.handleFragment(mediaObject({ objectId: 4, updateId: 14 }));
+
+    expect(test.client.stats.lostObjects).toBe(1);
+    expect(test.client.stats.windowLossRatio).toBeCloseTo(0.2);
+  });
+
   it("counts update-id gaps as loss and object-id repeats as duplicates", async () => {
     const test = harness();
     void test.client.attachDual();

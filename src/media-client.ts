@@ -183,6 +183,20 @@ export type MediaLaneStats = MediaLaneCounters & {
   rttMinMs: number;
   jitterMs: number;
   goodputBps: number;
+  /**
+   * The loss the receiver has attributed in the **open** measurement window,
+   * in the update-id space: `lost / (received + lost)`, over the objects of
+   * the window (MLP spec §5.2, §6.2.9).
+   *
+   * This is the receiver's own measurement of the lane's quality — the fact
+   * `DEGRADED` is decided on (MLP spec §6.7.1) — and it is the same number
+   * the sender reads from the feedback the receiver sends (§6.2.2).
+   *
+   * `null` when the window carries no object accounting: a window with
+   * nothing in it carries no loss signal, and the rule is that the previous
+   * ratio stands (§6.2.4), never that the loss became zero.
+   */
+  windowLossRatio: number | null;
 };
 
 const DEDUPE_WINDOW_OBJECTS = 4_096;
@@ -452,7 +466,21 @@ export class MediaLaneClient {
       rttMinMs: Number.isFinite(this.rttMinMs) ? Math.round(this.rttMinMs) : Math.round(this.rttMs),
       jitterMs: Math.round(this.jitterMs),
       goodputBps: this.lastGoodputBps,
+      windowLossRatio: this.windowLossRatio,
     };
+  }
+
+  /**
+   * The receiver's own loss measurement for the open window (MLP spec §6.7.1):
+   * the updates it never saw against the updates it should have seen, or
+   * `null` when the window carries no object accounting.
+   */
+  get windowLossRatio(): number | null {
+    const attempted = this.windowObjects + this.windowLost;
+    if (attempted === 0) {
+      return null;
+    }
+    return this.windowLost / attempted;
   }
 
   get mediaSessionId(): string {

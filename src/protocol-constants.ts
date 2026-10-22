@@ -246,6 +246,17 @@ export function assemblyTimeoutMs(rttMs: number): number {
   return 3 * clampNumber(rttMs, 1, 60_000) + 500;
 }
 
+/**
+ * `0.05` — the attributed loss ratio above which a lane is `DEGRADED`
+ * (MLP spec §6.7.1, §6.2.4).
+ *
+ * The ratio is measured by the receiver, in the update-id space, over its own
+ * report window; the sender reads the same ratio from the feedback and
+ * reports the same state. One threshold, one measurement, and the receiver
+ * is the end that takes it.
+ */
+export const LOSS_DEGRADED = 0.05;
+
 /** `now_ms + deadline` with the bootstrap deadline; `0` means "never". */
 export function inputDeadlineMs(deadlineMs: number): number {
   return deadlineMs > 0 ? Math.trunc(deadlineMs) : 0;
