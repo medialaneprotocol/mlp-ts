@@ -257,6 +257,18 @@ export function assemblyTimeoutMs(rttMs: number): number {
  */
 export const LOSS_DEGRADED = 0.05;
 
+/**
+ * `0.25` — the share of the grid a receiver must hold as stale for the lane
+ * to read `CONVERGING` (MLP spec §6.7.1).
+ *
+ * Below it the holes are repaired inside a repair round, and a lane whose
+ * whole fault is a cell or two is not a picture that is still arriving: it is
+ * `LIVE` or `DEGRADED` by the other two facts. The same share the sender
+ * reads from the acknowledgement's pending set, so the two ends name one
+ * state.
+ */
+export const CONVERGING_PENDING = 0.25;
+
 /** `now_ms + deadline` with the bootstrap deadline; `0` means "never". */
 export function inputDeadlineMs(deadlineMs: number): number {
   return deadlineMs > 0 ? Math.trunc(deadlineMs) : 0;
