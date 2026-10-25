@@ -59,15 +59,19 @@ import {
   MediaFragmentFlags,
   type MediaFragment,
   type MediaObject,
+  FEC_MAX_K,
+  FEC_TRACKER_CAPACITY,
   MediaObjectAssembler,
   type MediaRejectReason,
   type MediaTlvEntry,
   MediaTlv,
+  recoverPart,
   decodeMediaMessage,
   defaultObjectAssemblerConfig,
   defaultPriorityFor,
   encodeMediaFragment,
   mediaRejectCode,
+  readTlvU16Pair,
   readTlvU32,
   readTlvU64,
   tlvU32,
@@ -1218,6 +1222,111 @@ export class MediaLaneClient {
     transport.sendFragment(bytes);
   }
 
+  /**
+   * The wire parity's receiver half (MLP spec §6.9): the newest groups'
+   * parts and parity, so the loss of one part in a multi-part update costs
+   * no round trip. The parity object never reaches the application; a
+   * recovery is indistinguishable from a wire arrival.
+   */
+  private readonly fecGroups = new Map<
+    number,
+    {
+      k: number;
+      held: Map<number, Uint8Array>;
+      parity: Uint8Array | null;
+      template: MediaObject;
+    }
+  >();
+
+  /**
+   * The parity's chance to answer before the repair ladder (MLP spec
+   * §6.9): holding one more part — or the parity itself — may complete
+   * a group that lost exactly one part. Returns the recovery event, if one
+   * just completed.
+   */
+  private fecOnMediaObject(object: MediaObject): MediaObject | null {
+    const groupId = readTlvU64(object, MediaTlv.FEC_GROUP_ID);
+    if (groupId !== null) {
+      // A parity object: hold it, try the recovery, and never hand the
+      // parity itself to the application.
+      const k = readTlvU32(object, MediaTlv.FEC_K) ?? 0;
+      if (k < 2 || k > FEC_MAX_K) {
+        return null;
+      }
+      const group = this.fecGroup(groupId, k, object);
+      group.parity = object.payload;
+      return this.fecRecover(groupId);
+    }
+    const updateId = readTlvU64(object, MediaTlv.UPDATE_ID);
+    const part = readTlvU16Pair(object, MediaTlv.PART);
+    if (updateId === null || updateId < 1 || part === null) {
+      return null;
+    }
+    const partIndex = part.first;
+    const partCount = part.second;
+    if (partCount < 2 || partCount > FEC_MAX_K) {
+      return null;
+    }
+    const group = this.fecGroup(updateId, partCount, object);
+    if (!group.held.has(partIndex)) {
+      group.held.set(partIndex, object.payload);
+    }
+    if (group.held.size === partCount) {
+      // The parts all arrived: the parity has nothing to do.
+      this.fecGroups.delete(updateId);
+      return null;
+    }
+    return this.fecRecover(updateId);
+  }
+
+  private fecGroup(updateId: number, k: number, template: MediaObject) {
+    let group = this.fecGroups.get(updateId);
+    if (group === undefined) {
+      if (this.fecGroups.size >= FEC_TRACKER_CAPACITY) {
+        const oldest = this.fecGroups.keys().next().value;
+        if (oldest !== undefined) {
+          this.fecGroups.delete(oldest);
+        }
+      }
+      group = { k, held: new Map(), parity: null, template };
+      this.fecGroups.set(updateId, group);
+    }
+    return group;
+  }
+
+  private fecRecover(updateId: number): MediaObject | null {
+    const group = this.fecGroups.get(updateId);
+    if (group === undefined || group.parity === null) {
+      return null;
+    }
+    const held = [...group.held.entries()].map(([partIndex, payload]) => ({
+      partIndex,
+      payload,
+    }));
+    if (held.length !== group.k - 1) {
+      return null;
+    }
+    const recovery = recoverPart(group.parity, held, group.k);
+    if (recovery === null) {
+      // A parity that does not check out is a parity that proves nothing:
+      // the repair ladder owns this group (MLP spec §6.9).
+      this.fecGroups.delete(updateId);
+      return null;
+    }
+    this.fecGroups.delete(updateId);
+    return {
+      ...group.template,
+      headerExt: [
+        ...group.template.headerExt.filter(
+          (entry) => entry.type !== MediaTlv.PART,
+        ),
+        tlvU32(MediaTlv.PART, ((recovery.partIndex << 16) | group.k) >>> 0),
+      ],
+      payload: recovery.payload,
+      flags: group.template.flags | 0x01, // FIN: the object is whole
+    };
+  }
+
   private noteObjectArrival(object: MediaObject): void {
     this.counters.receivedObjects += 1;
     this.counters.receivedBytes += object.payload.byteLength;
@@ -1226,7 +1335,20 @@ export class MediaLaneClient {
     this.noteObjectId(object.objectId);
 
     switch (object.classValue) {
-      case MediaFragmentClass.MEDIA:
+      case MediaFragmentClass.MEDIA: {
+        // The wire parity's chance to answer before the repair ladder (MLP
+        // spec §6.9): a parity object never reaches the application; a
+        // recovery arrives in its place, indistinguishable from a wire one.
+        const recovered = this.fecOnMediaObject(object);
+        if (recovered !== null) {
+          this.noteObjectArrival(recovered);
+          return;
+        }
+        if (readTlvU64(object, MediaTlv.FEC_GROUP_ID) !== null) {
+          // The parity object itself: held by the tracker above, never
+          // applied, never counted as content.
+          return;
+        }
         // The loss accounting lives in the **update-id** space, not in the
         // object-id space (MLP spec §5.2): the object id identifies an object
         // for deduplication (§4.4) and its space is *per sender* (§4.2), so a
@@ -1236,6 +1358,7 @@ export class MediaLaneClient {
         this.noteMediaUpdateId(object);
         this.options.onObject?.(object);
         break;
+      }
       case MediaFragmentClass.CURSOR:
         this.decodeCursor(object);
         break;

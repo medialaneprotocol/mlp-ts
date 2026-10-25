@@ -97,7 +97,149 @@ export const MediaTlv = {
   INPUT_SEQ: 0x0d,
   CELL_COUNT: 0x0e,
   COST_MS: 0x0f,
+  STREAM_ID: 0x10,
+  FEC_GROUP_ID: 0x11,
+  FEC_K: 0x12,
+  PATH_ID: 0x13,
+  GREASE: 0x7f,
 } as const;
+
+/**
+ * The wire parity's receiver half (MLP spec §6.9): one XOR parity object
+ * per multi-part update on a measured-lossy lane. Each part rides as a
+ * `u16 LE length ‖ payload` block; the parity payload is the blocks' XOR
+ * followed by the group's CRC-32 (IEEE) over the concatenated blocks in
+ * part-index order. A group holding k−1 of k parts plus the parity
+ * rebuilds the missing part on arrival; a parity whose XOR does not
+ * reproduce the group's CRC recovers nothing and is rejected — the
+ * repair ladder answers, and wrong bytes never leave the recovery path.
+ */
+export const FEC_MAX_K = 8;
+export const FEC_TRACKER_CAPACITY = 8;
+
+/** CRC-32 (IEEE 802.3), table-free. */
+export function crc32(bytes: Uint8Array): number {
+  let crc = 0xffff_ffff;
+  for (let at = 0; at < bytes.length; at += 1) {
+    crc ^= bytes[at];
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb8_8320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffff_ffff) >>> 0;
+}
+
+/** The block form of one part: `u16 LE length ‖ payload`. */
+function blockOf(part: Uint8Array): Uint8Array {
+  const out = new Uint8Array(2 + part.length);
+  out[0] = part.length & 0xff;
+  out[1] = (part.length >> 8) & 0xff;
+  out.set(part, 2);
+  return out;
+}
+
+/** The parity payload for a group of parts. */
+export function groupParity(parts: Uint8Array[]): Uint8Array {
+  const blocks = parts.map(blockOf);
+  const width = blocks.reduce((wide, block) => Math.max(wide, block.length), 2);
+  const parity = new Uint8Array(width + 4);
+  for (const block of blocks) {
+    for (let at = 0; at < block.length; at += 1) {
+      parity[at] ^= block[at];
+    }
+  }
+  let joined = 0;
+  for (const block of blocks) {
+    joined += block.length;
+  }
+  const joinedBytes = new Uint8Array(joined);
+  let at = 0;
+  for (const block of blocks) {
+    joinedBytes.set(block, at);
+    at += block.length;
+  }
+  const crc = crc32(joinedBytes);
+  parity[width] = crc & 0xff;
+  parity[width + 1] = (crc >>> 8) & 0xff;
+  parity[width + 2] = (crc >>> 16) & 0xff;
+  parity[width + 3] = (crc >>> 24) & 0xff;
+  return parity;
+}
+
+export type FecRecovery = {
+  partIndex: number;
+  payload: Uint8Array;
+};
+
+/**
+ * The recovery: `k` parts of which exactly `k − 1` are held, and the
+ * group's parity. Returns the missing part, or `null` when the parity does
+ * not check out — the caller falls through to the repair ladder, never
+ * to wrong bytes.
+ */
+export function recoverPart(
+  parity: Uint8Array,
+  held: Array<{ partIndex: number; payload: Uint8Array }>,
+  k: number,
+): FecRecovery | null {
+  if (k < 2 || k > FEC_MAX_K || held.length !== k - 1 || parity.length < 6) {
+    return null;
+  }
+  const heldIndices = new Set(held.map((entry) => entry.partIndex));
+  let missing = -1;
+  for (let candidate = 0; candidate < k; candidate += 1) {
+    if (!heldIndices.has(candidate)) {
+      missing = candidate;
+      break;
+    }
+  }
+  if (missing < 0) {
+    return null;
+  }
+
+  const width = parity.length - 4;
+  const acc = parity.slice(0, width);
+  for (const entry of held) {
+    const block = blockOf(entry.payload);
+    if (block.length > width) {
+      return null;
+    }
+    for (let at = 0; at < block.length; at += 1) {
+      acc[at] ^= block[at];
+    }
+  }
+  const length = acc[0] | (acc[1] << 8);
+  if (2 + length > acc.length) {
+    return null;
+  }
+  const payload = acc.slice(2, 2 + length);
+
+  const all = [...held, { partIndex: missing, payload }].sort(
+    (first, second) => first.partIndex - second.partIndex,
+  );
+  let joined = 0;
+  for (const entry of all) {
+    joined += 2 + entry.payload.length;
+  }
+  const joinedBytes = new Uint8Array(joined);
+  let at = 0;
+  for (const entry of all) {
+    const block = blockOf(entry.payload);
+    joinedBytes.set(block, at);
+    at += block.length;
+  }
+  // The stored CRC rides little-endian over the last four bytes.
+  const storedCrc =
+    (parity[parity.length - 4] |
+      (parity[parity.length - 3] << 8) |
+      (parity[parity.length - 2] << 16) |
+      (parity[parity.length - 1] << 24)) >>>
+    0;
+  if (crc32(joinedBytes) !== storedCrc) {
+    return null;
+  }
+  return { partIndex: missing, payload };
+}
 
 /** Carrier kind: the message boundary differs, the bytes do not (`§5.1`). */
 export type MediaCarrier = "stream" | "datagram";
